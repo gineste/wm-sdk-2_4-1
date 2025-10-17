@@ -15,7 +15,6 @@
 #include "spi.h"
 #include "power.h"
 
-#include "bme280_wrapper.h"
 #include "lis2dh12_wrapper.h"
 #include "app_config.h"
 #include "format_data.h"
@@ -52,7 +51,7 @@ static bool ruuvi_spi_init(void)
     /* Initialize LIS2DH12 Chip select pin. */
     Gpio_outputSetCfg(BOARD_GPIO_ID_LIS2DX12_SPI_CS, &gpio_conf);
     /* Initialize BME280 Chip select pin. */
-    Gpio_outputSetCfg(BOARD_GPIO_ID_BME280_SPI_CS, &gpio_conf);
+    //Gpio_outputSetCfg(BOARD_GPIO_ID_BME280_SPI_CS, &gpio_conf);
     /* Initialize SPI driver. */
 
     conf.bit_order = SPI_ORDER_MSB;
@@ -121,7 +120,7 @@ static uint32_t sensor_task()
                cfg->humidity_enable ||
                cfg->pressure_enable )
             {
-                time_to_run = BME280_wrapper_startMeasurement();
+                //time_to_run = BME280_wrapper_startMeasurement();
             }
 
             if(cfg->accel_x_enable ||
@@ -147,12 +146,12 @@ static uint32_t sensor_task()
                 cfg->humidity_enable ||
                 cfg->pressure_enable )
             {
-                bme280_wrapper_measurement_t measurement;
-                BME280_wrapper_readMeasurement(&measurement);
+                //bme280_wrapper_measurement_t measurement;
+                //BME280_wrapper_readMeasurement(&measurement);
 
-                m_sensor_data.temp = measurement.temperature;
-                m_sensor_data.press = measurement.pressure;
-                m_sensor_data.humi = measurement.humidity;
+                m_sensor_data.temp = 0xCCCCCCCC;
+                m_sensor_data.press = 0xBBBBBBBB;
+                m_sensor_data.humi = 0xAAAAAAAA;
             }
 
             if(cfg->accel_x_enable ||
@@ -228,8 +227,9 @@ void App_init(const app_global_functions_t * functions)
     App_Config_init(on_config_update);
 
     ruuvi_spi_init();
-    BME280_wrapper_init();
     LIS2DH12_wrapper_init();
+    Gpio_outputWrite(BOARD_GPIO_ID_SENSOR_PWR_2, GPIO_LEVEL_HIGH);
+
 
     /* Launch the sensor task. */
     App_Scheduler_addTask_execTime(sensor_task, APP_SCHEDULER_SCHEDULE_ASAP, 100);
