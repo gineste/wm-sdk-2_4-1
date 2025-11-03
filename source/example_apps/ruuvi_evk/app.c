@@ -8,16 +8,36 @@
 
 #include "api.h"
 #include "node_configuration.h"
-#include "tlv.h"
 #include "app_scheduler.h"
+#include "app_config.h"
 #include "board.h"
+
 #include "gpio.h"
+#include "i2c.h"
 #include "spi.h"
 #include "power.h"
+#include "led.h"
 
 #include "lis2dh12_wrapper.h"
-#include "app_config.h"
+#include "sht_wrapper.h"
+
 #include "format_data.h"
+#include "tlv.h"
+
+#define DEBUG_LOG_MODULE_NAME "BLE_SCANNER_LIB"
+#define DEBUG_LOG_MAX_LEVEL LVL_DEBUG
+#include "debug_log.h"
+
+/* Inline local declaration */
+static inline void led_green(bool on)       { Led_set(1,on); /* Switch LED to state. */ }
+static inline void led_red(bool on)         { Led_set(0,on); /* Switch LED to state. */ }
+
+static inline void toggle_green()           {  static bool st = false;
+                                                Led_set(1,st); /* Switch LED to state. */
+                                                st=!st; }
+static inline void toggle_red()             {  static bool st = true;
+                                                Led_set(0,st); /* Switch LED to state. */
+                                                st=!st;  }
 
 
 /* Endpoints on which sensor data is sent. */
@@ -48,17 +68,36 @@ static bool ruuvi_spi_init(void)
         .level_default = GPIO_LEVEL_HIGH
     };
 
-    /* Initialize LIS2DH12 Chip select pin. */
+    /* Initialise LIS2DH12 Chip select pin. */
     Gpio_outputSetCfg(BOARD_GPIO_ID_LIS2DX12_SPI_CS, &gpio_conf);
-    /* Initialize BME280 Chip select pin. */
-    //Gpio_outputSetCfg(BOARD_GPIO_ID_BME280_SPI_CS, &gpio_conf);
-    /* Initialize SPI driver. */
 
+    /* Initialise SPI driver. */
     conf.bit_order = SPI_ORDER_MSB;
     conf.clock = 4000000;
     conf.mode = SPI_MODE_HIGH_FIRST;
     res = SPI_init(&conf);
     if ((res != SPI_RES_OK) && (res != SPI_RES_ALREADY_INITIALIZED))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+
+/**
+    @brief     initialize SPI driver and sensors chip select pins.
+*/
+static bool ruuvi_i2c_init(void)
+{
+    i2c_res_e res;
+    i2c_conf_t conf;
+    conf.clock = 400000;    // 400kHz
+    conf.pullup = true;     // pull
+
+    // Configure I2C com (SDA/SCL pins & frequency)
+    res = I2C_init(&conf);
+    if ((res != I2C_RES_OK) && (res != I2C_RES_ALREADY_INITIALIZED))
     {
         return false;
     }
@@ -116,11 +155,18 @@ static uint32_t sensor_task()
             time_to_run = APP_SCHEDULER_SCHEDULE_ASAP;
             m_task_state = SENSOR_TASK_STATE_SEND_DATA;
 
+            toggle_green();
+            toggle_red();
+
             if(cfg->temperature_enable ||
-               cfg->humidity_enable ||
-               cfg->pressure_enable )
+               cfg->humidity_enable )
             {
-                //time_to_run = BME280_wrapper_startMeasurement();
+                time_to_run = SHT_wrapper_startMeasurement();
+            }
+
+            if(cfg->pressure_enable )
+            {
+                // TO BE DONE
             }
 
             if(cfg->accel_x_enable ||
@@ -143,15 +189,18 @@ static uint32_t sensor_task()
             m_sensor_data.count++;
 
             if (cfg->temperature_enable ||
-                cfg->humidity_enable ||
-                cfg->pressure_enable )
+                cfg->humidity_enable )
             {
-                //bme280_wrapper_measurement_t measurement;
-                //BME280_wrapper_readMeasurement(&measurement);
+                sht_wrapper_measurement_t measurement = { 0 };
+                SHT_wrapper_readMeasurement(&measurement);
 
-                m_sensor_data.temp = 0xCCCCCCCC;
-                m_sensor_data.press = 0xBBBBBBBB;
-                m_sensor_data.humi = 0xAAAAAAAA;
+                m_sensor_data.temp = (int32_t) measurement.temperature;
+                m_sensor_data.humi = (int32_t) measurement.humidity;
+            }
+
+            if(cfg->pressure_enable )
+            {
+                // TO BE DONE
             }
 
             if(cfg->accel_x_enable ||
@@ -167,6 +216,9 @@ static uint32_t sensor_task()
             }
 
             send_data(&m_sensor_data);
+
+            toggle_green();
+            toggle_red();
 
             m_task_state = SENSOR_TASK_STATE_START_MEAS;
             time_to_run = cfg->sensors_period_ms;
@@ -203,6 +255,39 @@ static void on_config_update(void)
 }
 
 /**
+    @brief Task called every 2s until the device is ready. Then the task proceed with the main sensor task.
+*/
+static uint32_t startup_task (void)
+{
+    E_sht_wrapper_state_t res = 0;
+    res = SHT_wrapper_readyState();
+
+    // Check serial is valid
+    if (res == E_SHT_READY)
+    {
+        led_red(false);
+        led_green(true);
+
+        /* Launch the sensor task. */
+        App_Scheduler_addTask_execTime(sensor_task, APP_SCHEDULER_SCHEDULE_ASAP, 100);
+        return APP_SCHEDULER_STOP_TASK;
+    }
+    else if (res == E_SHT_BUSY)
+    {
+        // Wait for communication to be fully ready
+        led_red(true);
+        led_green(true);
+        return 2000;
+    }
+    else // Serial not valid or communication error
+    {
+        led_red(true);
+        led_green(false);
+        return 2000;
+    }
+}
+
+/**
     @brief   Initialization callback for application
 
     This function is called after hardware has been initialized but the
@@ -210,6 +295,10 @@ static void on_config_update(void)
 */
 void App_init(const app_global_functions_t * functions)
 {
+
+    led_red(true);
+    led_green(true);
+
     /* Basic configuration of the node with a unique node address. */
     if (configureNodeFromBuildParameters() != APP_RES_OK)
     {
@@ -226,13 +315,20 @@ void App_init(const app_global_functions_t * functions)
     /* Initialize all the modules. */
     App_Config_init(on_config_update);
 
+    // Power ON sensors ! => No difference if set / unset or commented....
+    //Gpio_outputWrite(BOARD_GPIO_ID_SENSOR_PWR_1, GPIO_LEVEL_HIGH);
+    //Gpio_outputWrite(BOARD_GPIO_ID_SENSOR_PWR_2, GPIO_LEVEL_HIGH);
+
+    // Communication initialisation
+    ruuvi_i2c_init();
     ruuvi_spi_init();
+
+    // Driver initialisation
+    SHT_wrapper_init();
     LIS2DH12_wrapper_init();
-    Gpio_outputWrite(BOARD_GPIO_ID_SENSOR_PWR_2, GPIO_LEVEL_HIGH);
 
-
-    /* Launch the sensor task. */
-    App_Scheduler_addTask_execTime(sensor_task, APP_SCHEDULER_SCHEDULE_ASAP, 100);
+    // Start startup task
+    App_Scheduler_addTask_execTime(startup_task, APP_SCHEDULER_SCHEDULE_ASAP, 500);
 
     /*
      * Start the stack.
