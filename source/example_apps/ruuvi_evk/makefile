@@ -6,7 +6,7 @@ SRCS += $(APP_SRCS_PATH)lis2dh12_wrapper.c
 
 SRCS += $(APP_SRCS_PATH)SHT_driver/embedded-common/sensirion_common.c
 SRCS += $(APP_SRCS_PATH)shtc1.c
-SRCS += $(APP_SRCS_PATH)sensirion_hw_i2c_implementation.c
+SRCS += $(APP_SRCS_PATH)sht_wrapper.c
 
 SRCS += $(APP_SRCS_PATH)app_config.c
 SRCS += $(APP_SRCS_PATH)format_data.c
@@ -41,7 +41,7 @@ $(SRCS_PATH)LIS2DH12_driver/lis2dh12_STdC/driver/lis2dh12_reg.c:
 	$(shell git clone https://github.com/STMicroelectronics/STMems_Standard_C_drivers.git $(SRCS_PATH)LIS2DH12_driver \
 		&& cd $(SRCS_PATH)LIS2DH12_driver && git checkout v1.01 -b v1.01)
 
-$(SRCS_PATH)sensirion_hw_i2c_implementation.c: $(APP_SRCS_PATH)SHT_driver/embedded-common/sensirion_common.c
+$(SRCS_PATH)sht_wrapper.c: $(APP_SRCS_PATH)SHT_driver/embedded-common/sensirion_common.c
 $(SRCS_PATH)shtc1.c: $(APP_SRCS_PATH)SHT_driver/embedded-common/sensirion_common.c
 $(SRCS_PATH)SHT_driver/embedded-common/sensirion_common.c:
 	@echo "Cloning SHT_driver with submodules..."
