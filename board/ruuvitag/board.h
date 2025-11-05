@@ -27,27 +27,28 @@
 #define BOARD_I2C_SDA_PIN   4   // mapped to pin P0.04 (06)
 
 // List of GPIO pins
-#define BOARD_GPIO_PIN_LIST            {17, /* P0.17 */\
-                                        19, /* P0.19 */\
-                                        13, /* P0.13 */\
-                                        2,  /* P0.02. LIS2DH12 INT1 pin. can be replaced by P0.06 if you want to use the LIS2DH12 INT2 pin instead */\
-                                        8,  /* P0.08. SPI CS pin for the LIS2DH12 accelerometer */\
-                                        3,  /* P0.03. SPI CS pin for the DPS310 pressure sensor */\
-                                        16, /* P0.16 */\
-                                        12, /* P0.16 */\
-                                        7}  /* P0.03.*/
+#define BOARD_GPIO_PIN_LIST             {17, /* P0.17 */                                                                                               \
+                                        19, /* P0.19 */                                                                                                \
+                                        13, /* P0.13 */                                                                                                \
+                                        2,  /* P0.02. LIS2DH12 INT1 pin (can be replaced by P0.06 if you want to use the LIS2DH12 INT2 pin instead) */ \
+                                        6,  /* P0.06. LIS2DH12 INT2 pin (instead of LIS2DH12 INT2 pin) */                                              \
+                                        8,  /* P0.08. SPI CS pin for the LIS2DH12 accelerometer */                                                     \
+                                        3,  /* P0.03. SPI CS pin for the DPS310 pressure sensor */                                                     \
+                                        16, /* P0.16 */                                                                                                \
+                                        12, /* P0.12 */                                                                                                \
+                                        7}  /* P0.07.*/
 
 // User friendly name for GPIOs (IDs mapped to the BOARD_GPIO_PIN_LIST table)
 #define BOARD_GPIO_ID_LED1              0  // mapped to pin P0.17
 #define BOARD_GPIO_ID_LED2              1  // mapped to pin P0.19
 #define BOARD_GPIO_ID_BUTTON1           2  // mapped to pin P0.13
 #define BOARD_GPIO_ID_LIS2DX12_INT1     3  // mapped to pin P0.02
-//#define BOARD_GPIO_ID_LIS2DX12_INT2   3  // mapped to pin P0.06
-#define BOARD_GPIO_ID_LIS2DX12_SPI_CS   4  // mapped to pin P0.08
-#define BOARD_GPIO_ID_DPS310_SPI_CS     5  // mapped to pin P0.03 (05)
-#define BOARD_GPIO_ID_TMP116_ALERT      6  // mapped to pin P0.16 (19)
-#define BOARD_GPIO_ID_SENSOR_PWR_1      7  // mapped to pin P0.12 (15)
-#define BOARD_GPIO_ID_SENSOR_PWR_2      8  // mapped to pin P0.07 (09)
+#define BOARD_GPIO_ID_LIS2DX12_INT2     4  // mapped to pin P0.06
+#define BOARD_GPIO_ID_LIS2DX12_SPI_CS   5  // mapped to pin P0.08
+#define BOARD_GPIO_ID_DPS310_SPI_CS     6  // mapped to pin P0.03
+#define BOARD_GPIO_ID_TMP116_ALERT      7  // mapped to pin P0.16
+#define BOARD_GPIO_ID_SENSOR_PWR_1      8  // mapped to pin P0.12
+#define BOARD_GPIO_ID_SENSOR_PWR_2      9  // mapped to pin P0.07
 
 // List of LED IDs
 #define BOARD_LED_ID_LIST               {BOARD_GPIO_ID_LED1,   BOARD_GPIO_ID_LED2}

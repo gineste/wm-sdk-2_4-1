@@ -15,8 +15,8 @@
 typedef struct
 {
     uint16_t count; /**< Counter; incremented by one each period. */
-    int32_t temp;  /**< Temperature in 0.01°C. */
-    uint32_t humi;  /**< Humidity in 1/1024 % relative humidity (1% is 1024). */
+    int32_t temp;   /**< Temperature in 0.01°C. */
+    int32_t humi;   /**< Humidity in 1/1024 % relative humidity (1% is 1024). */
     uint32_t press; /**< Pressure in 0.01 Pascal. */
     int32_t acc_x;  /**< Acceleration on X axis in mg [-2g / +2g]. */
     int32_t acc_y;  /**< Acceleration on Y axis in mg [-2g / +2g]. */
