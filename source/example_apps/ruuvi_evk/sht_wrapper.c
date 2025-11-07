@@ -219,7 +219,18 @@ uint32_t SHT_wrapper_startMeasurement(void)
 
 bool SHT_wrapper_readMeasurement(sht_wrapper_measurement_t * pMeasurement)
 {
-    shtc1_read(&pMeasurement->temperature, &pMeasurement->humidity);
+    int32_t temperature = 0;    // expressed in 0.001°C
+    int32_t humidity = 0;       // expressed in 0.001%
+
+    // Read data from sensor
+    shtc1_read(&temperature, & humidity);
+
+    // Refactor received values
+    pMeasurement->temperature = temperature / 10;
+    pMeasurement->humidity = humidity / 10;
+
+    // Set SHTC device back to sleep
     shtc1_sleep();
+
     return true;
 }
