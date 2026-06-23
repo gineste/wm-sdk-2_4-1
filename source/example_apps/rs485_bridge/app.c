@@ -41,7 +41,8 @@
 #include "cbor.h"
 
 #define DEBUG_LOG_MODULE_NAME "AP"
-#define DEBUG_LOG_MAX_LEVEL LVL_INFO
+/* LOW-POWER branch: level 0 → no log is ever emitted (debug UART silent). */
+#define DEBUG_LOG_MAX_LEVEL 0
 #define DEBUG_LOG_UART_BAUDRATE 1000000
 #include "debug_log.h"
 
@@ -410,9 +411,8 @@ static const lis2dw_cfg_t m_lis2dw_cfg = {
     .pullup     = true,  /* no external pull-ups on sensorv26 */
 };
 
-/* ADS1220 ADC — disabled for now (chip not responding on the bench; revisit later).
- * Set to 1 to re-enable init + periodic reads. */
-#define USE_ADS1220  1
+/* ADS1220 ADC — OFF on this low-power board (chip not wired): no SPIM00, no reads. */
+#define USE_ADS1220  0
 
 #if USE_ADS1220
 /* ── CTN foliar / frost probe — ratiometric half-bridge on the ADS1220 ────────
@@ -719,6 +719,14 @@ static inline void de_tx(void)
 static inline void de_rx(void)
 {
     Gpio_outputWrite(BOARD_GPIO_ID_RS485_DE, GPIO_LEVEL_LOW);
+}
+
+/* LOW-POWER: gate the external VBAT supply (RS485 transceiver). Pulse it on
+ * before an RS485 motor transaction and off afterwards. */
+static inline void vbat_ext_set(bool on)
+{
+    Gpio_outputWrite(BOARD_GPIO_ID_VBAT_EXT_EN,
+                     on ? GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW);
 }
 
 /* ── RS485 TX (main context only — blocks until frame is physically sent) ───── */
@@ -1104,12 +1112,8 @@ static void flush_pending_tx(void)
 /* ── Poll task: forward completed frames, handle reply timeout ───────────────── */
 static uint32_t poll_task(void)
 {
-    /* Start BLE scanner once, on first task execution (stack is running here). */
-    if (!lib_beacon_rx->isScannerStarted())
-    {
-        app_res_e r = lib_beacon_rx->startScanner(APP_LIB_BEACON_RX_CHANNEL_ALL);
-        LOG(LVL_INFO, "BLE scanner start: %d", r);
-    }
+    /* LOW-POWER branch: BLE scanner left OFF — continuous all-channel scanning
+     * keeps the radio awake and dominates current draw. */
 
     if (m_reply_ticks_left > 0U)
     {
@@ -1530,17 +1534,13 @@ void App_init(const app_global_functions_t * functions)
 {
     (void)functions;
 
-    LOG_INIT();
-    LOG(LVL_INFO, "RS485 bridge v1.1");
+    /* LOW-POWER branch: debug UART not initialised (no logs emitted anyway). */
+    /* LOG_INIT(); */
 
-    /* Set AUTOROLE_LL only on first boot (before the address is written by
-     * configureNodeFromBuildParameters). Subsequent boots preserve any role
-     * configured via Remote API / CSAP. */
-    app_addr_t _addr;
-    if (lib_settings->getNodeAddress(&_addr) != APP_RES_OK)
-    {
-        lib_settings->setNodeRole(APP_LIB_SETTINGS_ROLE_AUTOROLE_LE);
-    }
+    /* LOW-POWER branch: force AUTOROLE_LE on every boot so the node sleeps
+     * between access cycles (overrides any stored LL role). On the main branch
+     * this is conditional (first boot only); here we force it for the test. */
+    lib_settings->setNodeRole(APP_LIB_SETTINGS_ROLE_AUTOROLE_LE);
 
     configureNodeFromBuildParameters();
 
@@ -1583,13 +1583,14 @@ void App_init(const app_global_functions_t * functions)
     rs485_uart_init();
     rs485_uart_rx_arm();   /* start listening immediately */
 
-    /* External VBAT supply: enable at boot */
+    /* LOW-POWER branch: VBAT_EXT gated OFF at boot (the external supply / RS485
+     * transceiver is only powered on demand via vbat_ext_set() around an RS485
+     * motor transaction). */
     static const gpio_out_cfg_t vbat_en_cfg = {
         .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
-        .level_default = GPIO_LEVEL_HIGH,   /* high = supply enabled */
+        .level_default = GPIO_LEVEL_LOW,    /* low = supply disabled */
     };
     Gpio_outputSetCfg(BOARD_GPIO_ID_VBAT_EXT_EN, &vbat_en_cfg);
-    LOG(LVL_INFO, CGRN "VBAT_EXT enabled" C0);
 
     /* External VBAT fault: pull-up input, interrupt on falling edge (active-low) */
     static const gpio_in_cfg_t vbat_fault_cfg = {
