@@ -962,7 +962,9 @@ static void send_gauge_cbor_uplink(void)
 }
 
 /* Periodic MAX17261 read + log + uplink. Lazy init with retry (like the console
- * burst, logged 10 s apart). */
+ * burst, logged 10 s apart). MAX17261_init/LIS2DW_init call I2C_init themselves
+ * (bit-bang), so no separate bus scan is needed — a full 0x08..0x77 sweep in a
+ * cooperative task blocks long enough to trip the Wirepas LL watchdog. */
 static uint32_t gauge_monitor_task(void)
 {
     if (!m_gauge_ready)
@@ -970,7 +972,7 @@ static uint32_t gauge_monitor_task(void)
         max17261_res_e ir = MAX17261_init(GAUGE_RSENSE_MOHM, 1);
         if (ir != MAX17261_RES_OK)
         {
-            LOG(LVL_WARNING, CRED "MAX17261 init error %d — retry in 10s" C0, (int)ir);
+            LOG(LVL_WARNING, CRED "MAX17261 init error %d (I2C_ERR=1) — retry in 10s" C0, (int)ir);
             return GAUGE_MONITOR_PERIOD_MS;
         }
         LOG(LVL_INFO, CGRN "MAX17261 init OK" C0);
@@ -1963,6 +1965,15 @@ void App_init(const app_global_functions_t * functions)
      * via LOG_INIT) does not do this — Gpio_init() must be explicit. */
     Gpio_init();
 
+    /* External VBAT supply: enable FIRST, before any sensor/I2C access, so the
+     * LIS2DW/MAX17261 rail has time to come up (it powers the I2C bus). */
+    static const gpio_out_cfg_t vbat_en_cfg = {
+        .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
+        .level_default = GPIO_LEVEL_HIGH,   /* high = supply enabled */
+    };
+    Gpio_outputSetCfg(BOARD_GPIO_ID_VBAT_EXT_EN, &vbat_en_cfg);
+    LOG(LVL_INFO, CGRN "VBAT_EXT (EXT_EN) enabled" C0);
+
     /* LEDs: push-pull outputs, initially off */
     static const gpio_out_cfg_t led_cfg = {
         .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
@@ -1994,14 +2005,6 @@ void App_init(const app_global_functions_t * functions)
     /* RS485 UART: UARTE20 on P1.04 / P1.05 at 115200 baud */
     rs485_uart_init();
     rs485_uart_rx_arm();   /* start listening immediately */
-
-    /* External VBAT supply: enable at boot */
-    static const gpio_out_cfg_t vbat_en_cfg = {
-        .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
-        .level_default = GPIO_LEVEL_HIGH,   /* high = supply enabled */
-    };
-    Gpio_outputSetCfg(BOARD_GPIO_ID_VBAT_EXT_EN, &vbat_en_cfg);
-    LOG(LVL_INFO, CGRN "VBAT_EXT enabled" C0);
 
     /* External VBAT fault: pull-up input, interrupt on falling edge (active-low) */
     static const gpio_in_cfg_t vbat_fault_cfg = {

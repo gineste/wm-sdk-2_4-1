@@ -20,8 +20,8 @@
 /* ── Console UART (UARTE20 = SERIAL20, peripheral domain, P1 pins) ──────────── */
 /* board/canopee_v27/usart_dma_series.h remaps NRF_UARTE0 → NRF_UARTE20 so the
  * Wirepas debug HAL drives the console on the P1 pins below. */
-#define BOARD_USART_TX_PIN          39      /* P1.07 */
-#define BOARD_USART_RX_PIN          40      /* P1.08 */
+#define BOARD_USART_TX_PIN          40      /* P1.08 — console TX (adapter RX here) */
+#define BOARD_USART_RX_PIN          39      /* P1.07 — console RX                   */
 
 /* ── RS485 UART (UARTE30 = SERIAL30, LP domain, P0 pins) ───────────────────── */
 /* RS485 signals sit on P0 → only the LP-domain UARTE30 can route to them. The
