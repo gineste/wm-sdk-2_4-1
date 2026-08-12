@@ -8,7 +8,6 @@
   ],
   "schemaVersion": 39,
   "editable": true,
-  "timezone": "",
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -49,7 +48,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\")\n  |> last()\n  |> keep(columns: [\"umb_model\", \"umb_dev\", \"_field\", \"_value\"])\n  |> group()\n  |> sort(columns: [\"umb_model\", \"_field\"])"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" or r._measurement == \"davis\")\n  |> last()\n  |> keep(columns: [\"_measurement\",\"umb_model\",\"_field\",\"_value\"])\n  |> group() |> sort(columns: [\"_measurement\",\"umb_model\",\"_field\"])"
         }
       ]
     },
@@ -260,7 +259,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Wind \u2014 Speed & gust (m/s)",
+      "title": "Wind speed \u2014 WS501 vs Davis (m/s)",
       "datasource": {
         "type": "influxdb",
         "uid": "influxdb"
@@ -280,7 +279,7 @@
             "fillOpacity": 8,
             "showPoints": "never"
           },
-          "displayName": "${__field.labels._field}"
+          "displayName": "${__field.labels._measurement} \u00b7 ${__field.labels._field}"
         },
         "overrides": []
       },
@@ -304,14 +303,22 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\")\n  |> filter(fn: (r) => r._field == \"wind_speed_avg_ms\" or r._field == \"wind_gust_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"wind_speed_avg_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "B",
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"davis\")\n  |> filter(fn: (r) => r._field == \"wind_speed_ms\" or r._field == \"wind_gust_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Wind \u2014 Direction (\u00b0)",
+      "title": "Wind direction \u2014 WS501 vs Davis (\u00b0)",
       "datasource": {
         "type": "influxdb",
         "uid": "influxdb"
@@ -331,7 +338,7 @@
             "fillOpacity": 8,
             "showPoints": "never"
           },
-          "displayName": "${__field.labels._field}"
+          "displayName": "${__field.labels._measurement} \u00b7 ${__field.labels._field}"
         },
         "overrides": []
       },
@@ -355,7 +362,15 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\")\n  |> filter(fn: (r) => r._field == \"wind_dir_max_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"wind_dir_max_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "B",
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"davis\")\n  |> filter(fn: (r) => r._field == \"wind_dir_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },

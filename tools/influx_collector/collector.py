@@ -60,6 +60,7 @@ ENDPOINT_MAP = {
     9:  ("aem",   ["vsto", "vsrc", "temp_c", "power_uw", "status", "charging"]),
     11: ("ctn",   ["temp_c", "r_t", "diag"]),
     12: ("sp110", ["irradiance_wm2", "mv", "diag"]),
+    13: ("davis", ["wind_speed_ms", "wind_gust_ms", "wind_dir_deg"]),
     20: ("tag",   ["temp_c", "pressure_pa", "humidity_pct", "gas_ohm",
                    "acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]),
 }
