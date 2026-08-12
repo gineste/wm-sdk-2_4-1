@@ -70,6 +70,29 @@ DIAG_FIELDS = {
     7: "access_cycle_ms", 8: "max_cycle_ms", 24: "uptime_s",
 }
 
+# EP 14 UMB uplink: CBOR array [dev_addr, ch, val, ch, val, ...] per device.
+# UMB channel number → InfluxDB field name (OTT/Lufft WS series). Values sent as
+# CBOR null (channel in error / not available) are skipped.
+UMB_CHANNELS = {
+    100:   "air_temp_c",           160: "air_temp_avg_c",
+    110:   "dewpoint_c",           114: "wetbulb_c",
+    200:   "humidity_pct",         260: "humidity_avg_pct",
+    300:   "pressure_abs_hpa",     305: "pressure_rel_hpa",  365: "pressure_rel_avg_hpa",
+    400:   "wind_speed_ms",        440: "wind_gust_ms",      460: "wind_speed_avg_ms",
+    500:   "wind_dir_deg",         520: "wind_dir_min_deg",  540: "wind_dir_max_deg",
+    510:   "compass_deg",
+    900:   "global_rad_wm2",       960: "global_rad_avg_wm2",
+    620:   "precip_abs_mm",        625: "precip_diff_mm",     820: "precip_intensity_mmh",
+    700:   "precip_type",
+    112:   "heater_wind_temp_c",   113: "heater_temp_c",
+    10000: "supply_v",
+}
+
+# UMB device address (class<<12 | id) → friendly model tag.
+UMB_MODELS = {
+    0x7001: "WS501", 0x7002: "WS100",
+}
+
 
 def _lp_escape_tag(s: str) -> str:
     """Escape a line-protocol tag key/value (commas, spaces, equals)."""
@@ -153,7 +176,7 @@ def _num(x):
 
 
 def decode_uplink(src_ep: int, dst_ep: int, payload: bytes) -> Optional[tuple]:
-    """Return (measurement, {field: float}) for a known uplink, or None."""
+    """Return (measurement, {field: float}, {tag: str}) for a known uplink, or None."""
     if not payload:
         return None
 
@@ -171,25 +194,52 @@ def decode_uplink(src_ep: int, dst_ep: int, payload: bytes) -> Optional[tuple]:
             if val is None:
                 continue
             fields[DIAG_FIELDS.get(k, f"k{k}")] = val
-        return ("diag", fields) if fields else None
+        return ("diag", fields, {}) if fields else None
 
-    # Application endpoints: CBOR array of numbers.
+    # Application endpoints: CBOR array.
     try:
         arr = cbor2.loads(bytes(payload))
     except Exception:
         return None
     if not isinstance(arr, (list, tuple)) or not arr:
         return None
+
+    # EP 14 — UMB multi-sensor: [dev_addr, ch, val, ch, val, ...]. Decode per
+    # channel (null = channel in error, skipped) and tag by the UMB device.
+    if src_ep == 14:
+        if len(arr) < 3 or (len(arr) - 1) % 2 != 0:
+            return None
+        try:
+            dev = int(arr[0])
+        except (TypeError, ValueError):
+            return None
+        fields = {}
+        for i in range(1, len(arr), 2):
+            v = _num(arr[i + 1])
+            if v is None:                     # channel in error / not available
+                continue
+            try:
+                ch = int(arr[i])
+            except (TypeError, ValueError):
+                continue
+            fields[UMB_CHANNELS.get(ch, f"ch{ch}")] = v
+        if not fields:
+            return None
+        tags = {"umb_dev": f"0x{dev:04x}"}
+        if dev in UMB_MODELS:
+            tags["umb_model"] = UMB_MODELS[dev]
+        return ("umb", fields, tags)
+
+    # Generic application endpoints: CBOR array of numbers.
     vals = [_num(x) for x in arr]
     if any(v is None for v in vals):
         return None
-
     measurement, names = ENDPOINT_MAP.get(src_ep, (f"ep{src_ep}", []))
     fields = {}
     for i, v in enumerate(vals):
         name = names[i] if i < len(names) else f"v{i}"
         fields[name] = v
-    return (measurement, fields)
+    return (measurement, fields, {})
 
 
 class Collector:
@@ -213,7 +263,7 @@ class Collector:
         decoded = decode_uplink(src_ep, dst_ep, bytes(payload))
         if decoded is None:
             return
-        measurement, fields = decoded
+        measurement, fields, extra_tags = decoded
         if not fields:
             return
 
@@ -227,6 +277,8 @@ class Collector:
             tags.append(f"gw={_lp_escape_tag(gw)}")
         if sink:
             tags.append(f"sink={_lp_escape_tag(sink)}")
+        for k, v in extra_tags.items():
+            tags.append(f"{k}={_lp_escape_tag(str(v))}")
 
         field_str = ",".join(f"{k}={v}" for k, v in fields.items())
         ts_ns = int(rx_ms) * 1_000_000 if rx_ms else time.time_ns()
