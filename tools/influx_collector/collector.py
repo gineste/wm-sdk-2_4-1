@@ -61,6 +61,7 @@ ENDPOINT_MAP = {
     11: ("ctn",   ["temp_c", "r_t", "diag"]),
     12: ("sp110", ["irradiance_wm2", "mv", "diag"]),
     13: ("davis", ["wind_speed_ms", "wind_gust_ms", "wind_dir_deg"]),
+    30: ("pt100", ["temp_c", "resistance_ohm", "fault"]),
     20: ("tag",   ["temp_c", "pressure_pa", "humidity_pct", "gas_ohm",
                    "acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]),
 }
@@ -205,31 +206,37 @@ def decode_uplink(src_ep: int, dst_ep: int, payload: bytes) -> Optional[tuple]:
     if not isinstance(arr, (list, tuple)) or not arr:
         return None
 
-    # EP 14 — UMB multi-sensor: [dev_addr, ch, val, ch, val, ...]. Decode per
-    # channel (null = channel in error, skipped) and tag by the UMB device.
+    # EP 14 is shared by two apps, told apart by the CBOR array shape:
+    #  - UMB weather (rs485_bridge): [dev_addr, ch, val, ...]  -> odd length,
+    #    dev_addr an int class<<12|id (>= 0x1000); null channel = skipped
+    #  - MAX17261 fuel gauge (canopee): [voltage_mv, soc, temp_c, current_ma]
     if src_ep == 14:
-        if len(arr) < 3 or (len(arr) - 1) % 2 != 0:
-            return None
-        try:
+        n = len(arr)
+        if n >= 3 and n % 2 == 1 and isinstance(arr[0], int) and arr[0] >= 0x1000:
             dev = int(arr[0])
-        except (TypeError, ValueError):
-            return None
-        fields = {}
-        for i in range(1, len(arr), 2):
-            v = _num(arr[i + 1])
-            if v is None:                     # channel in error / not available
-                continue
-            try:
-                ch = int(arr[i])
-            except (TypeError, ValueError):
-                continue
-            fields[UMB_CHANNELS.get(ch, f"ch{ch}")] = v
-        if not fields:
-            return None
-        tags = {"umb_dev": f"0x{dev:04x}"}
-        if dev in UMB_MODELS:
-            tags["umb_model"] = UMB_MODELS[dev]
-        return ("umb", fields, tags)
+            fields = {}
+            for i in range(1, n, 2):
+                v = _num(arr[i + 1])
+                if v is None:                 # channel in error / not available
+                    continue
+                try:
+                    ch = int(arr[i])
+                except (TypeError, ValueError):
+                    continue
+                fields[UMB_CHANNELS.get(ch, f"ch{ch}")] = v
+            if not fields:
+                return None
+            tags = {"umb_dev": f"0x{dev:04x}"}
+            if dev in UMB_MODELS:
+                tags["umb_model"] = UMB_MODELS[dev]
+            return ("umb", fields, tags)
+        if n == 4:                            # MAX17261 fuel gauge
+            v = [_num(x) for x in arr]
+            if any(x is None for x in v):
+                return None
+            return ("gauge", {"voltage_mv": v[0], "soc_pct": v[1],
+                              "temp_c": v[2], "current_ma": v[3]}, {})
+        return None
 
     # Generic application endpoints: CBOR array of numbers.
     vals = [_num(x) for x in arr]

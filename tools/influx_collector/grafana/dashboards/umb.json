@@ -48,7 +48,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" or r._measurement == \"davis\")\n  |> last()\n  |> keep(columns: [\"_measurement\",\"umb_model\",\"_field\",\"_value\"])\n  |> group() |> sort(columns: [\"_measurement\",\"umb_model\",\"_field\"])"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" or r._measurement == \"davis\" or r._measurement == \"gauge\" or r._measurement == \"pt100\")\n  |> last()\n  |> keep(columns: [\"_measurement\",\"umb_model\",\"_field\",\"_value\"])\n  |> group() |> sort(columns: [\"_measurement\",\"umb_model\",\"_field\"])"
         }
       ]
     },
@@ -575,6 +575,65 @@
           },
           "refId": "A",
           "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"supply_v\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Board temperatures \u2014 MAX17261 & PT100 (\u00b0C)",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          },
+          "displayName": "${__field.labels._measurement} \u00b7 ${__field.labels._field}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"gauge\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "B",
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pt100\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     }
