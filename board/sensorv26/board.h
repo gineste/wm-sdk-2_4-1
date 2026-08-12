@@ -48,6 +48,13 @@
 #define BOARD_VBAT_EXT_EN_PIN       42      /* P1.10 — high = enable VBAT  */
 #define BOARD_VBAT_EXT_nFAULT_PIN  71      /* P2.07 — low  = fault active */
 
+/* ── Davis 6410/6415 anemometer + wind vane ────────────────────────────────── */
+#define USE_DAVIS6410
+#define BOARD_WIND_SPEED_PIN        69      /* P2.05 — reed pulse (1/rev), pull-up IRQ (P2.00 unusable) */
+#define BOARD_WIND_POT_PWR_PIN      65      /* P2.01 — vane pot supply (GPIO switched)  */
+#define BOARD_WIND_DIR_AIN_PORT      0      /* P0.02 — vane wiper → SAADC AnalogInput   */
+#define BOARD_WIND_DIR_AIN_PIN       2
+
 /* ── GPIO pin list (index = GPIO ID) ──────────────────────────────────────── */
 #define BOARD_GPIO_PIN_LIST          {BOARD_LED_GREEN_PIN,          \
                                       BOARD_LED_RED_PIN,            \
@@ -56,7 +63,9 @@
                                       BOARD_VBAT_EXT_EN_PIN,        \
                                       BOARD_VBAT_EXT_nFAULT_PIN,   \
                                       BOARD_SPI_CS_ADS1220_PIN,     \
-                                      BOARD_ADS1220_DRDY_PIN}
+                                      BOARD_ADS1220_DRDY_PIN,       \
+                                      BOARD_WIND_SPEED_PIN,         \
+                                      BOARD_WIND_POT_PWR_PIN}
 
 #define BOARD_GPIO_ID_LED_GREEN        0
 #define BOARD_GPIO_ID_LED_RED          1
@@ -66,6 +75,8 @@
 #define BOARD_GPIO_ID_VBAT_EXT_nFAULT  5
 #define BOARD_GPIO_ID_SPI_CS_ADS1220   6
 #define BOARD_GPIO_ID_ADS1220_DRDY     7
+#define BOARD_GPIO_ID_WIND_SPEED       8
+#define BOARD_GPIO_ID_WIND_POT_PWR     9
 
 /* ── LED configuration ─────────────────────────────────────────────────────── */
 #define BOARD_LED_ID_LIST            {BOARD_GPIO_ID_LED_GREEN, BOARD_GPIO_ID_LED_RED}

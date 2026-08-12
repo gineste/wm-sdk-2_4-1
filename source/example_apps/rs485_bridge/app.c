@@ -37,12 +37,19 @@
 #include "ndef.h"
 #include "lis2dw.h"
 #include "ads1220.h"
+#include "davis6410.h"
+#include "umb.h"
+#include "umb_config.h"
 #include "rs485_uart.h"
 #include "i2c.h"      /* low-level I2C HAL — used for the AEM10900 bus diagnostic */
 #include "cbor.h"
 
 #define DEBUG_LOG_MODULE_NAME "AP"
 #define DEBUG_LOG_MAX_LEVEL LVL_INFO
+
+/* Debug: silence noisy periodic logs (BLE RX / ACC / CTN / AEM) so the UMB
+ * polling logs stand out. Set BLE_RX_VERBOSE to 1 to restore BLE RX decoding. */
+#define BLE_RX_VERBOSE 0
 #define DEBUG_LOG_UART_BAUDRATE 115200
 #include "debug_log.h"
 
@@ -103,17 +110,21 @@ static uint8_t m_nfc_memory[NFC_MEMORY_SIZE];
  * record is CRC-protected and every write is verified by read-back, so a
  * corrupt or partially-written blob is never applied (which would otherwise
  * risk masking Remote-API settings on every boot). */
-#define NFC_COMMISSION_MAGIC  0x4E464331u   /* "NFC1" */
+#define NFC_COMMISSION_MAGIC  0x4E464334u   /* "NFC4" */
 #define NFC_STORE_WRITE_TRIES 3u
 
+/* One-shot NFC commissioning request in the stack's 32-byte persistent area
+ * (lib_storage). Pending iff net != 0; applied at boot then net cleared to 0.
+ * The UMB polling config is stored separately in the app_persistent user area
+ * (see umb_area_read/write), never here. */
 typedef struct {
     uint32_t magic;
-    uint32_t net;
-    uint32_t addr;
-    uint8_t  ch;
-    uint8_t  set_addr;
+    uint32_t net;         /* commissioning: network addr; 0 = none pending      */
+    uint32_t addr;        /* commissioning: node addr (if set_addr)             */
+    uint8_t  ch;          /* commissioning: RF channel                          */
+    uint8_t  set_addr;    /* commissioning: apply node addr?                    */
     uint8_t  _pad[2];
-    uint32_t crc;       /* CRC32 over all preceding fields */
+    uint32_t crc;         /* CRC32 over all preceding fields                    */
 } nfc_commission_store_t;
 
 /* Must fit the 32-byte application persistent area (see wms_storage.h). */
@@ -143,10 +154,20 @@ static bool nfc_store_valid(const nfc_commission_store_t * s)
 {
     if (s->magic != NFC_COMMISSION_MAGIC)        return false;
     if (s->crc   != nfc_store_crc(s))            return false;
-    if (s->net == 0u || s->net > 0xFFFFFEu)      return false;
-    if (s->ch  < 1u  || s->ch  > 11u)            return false;
-    if (s->set_addr && s->addr == 0u)            return false;
+    /* Commissioning is validated only when one is pending (net != 0). */
+    if (s->net != 0u)
+    {
+        if (s->net > 0xFFFFFEu)                  return false;
+        if (s->ch  < 1u  || s->ch  > 11u)        return false;
+        if (s->set_addr && s->addr == 0u)        return false;
+    }
     return true;
+}
+
+/* Commissioning is "pending" (to be applied once) when a network addr is set. */
+static bool nfc_store_commission_pending(const nfc_commission_store_t * s)
+{
+    return s->net != 0u;
 }
 
 /* Write a record and confirm it by read-back. Returns true only if the stored
@@ -166,12 +187,110 @@ static bool nfc_store_write(const nfc_commission_store_t * s)
     return false;
 }
 
-/* Invalidate the staged record (verified). Returns true if cleared. */
+/* Invalidate the whole record (verified). Returns true if cleared. */
 static bool nfc_store_clear(void)
 {
     nfc_commission_store_t cleared;
     memset(&cleared, 0, sizeof(cleared));   /* magic = 0 → invalid */
     return nfc_store_write(&cleared);
+}
+
+/* Load the current record for read-modify-write. On invalid/absent, returns a
+ * zeroed record with a valid magic (no commissioning pending, UMB disabled). */
+static void nfc_store_load(nfc_commission_store_t * s)
+{
+    memset(s, 0, sizeof(*s));
+    s->magic = NFC_COMMISSION_MAGIC;
+    if (lib_storage == NULL) return;
+    nfc_commission_store_t rb;
+    if (lib_storage->readPersistent(&rb, sizeof(rb)) == APP_RES_OK
+        && nfc_store_valid(&rb))
+        *s = rb;
+}
+
+/* Runtime UMB polling config (loaded from the user flash area at boot, set via
+ * EP_UMB_CFG). */
+static umb_config_t m_umb_cfg;
+
+/* ── UMB config persistence in the app_persistent "user" area (id 0x8AE573BA) ───
+ * This 16 KB user area is SEPARATE from the stack's persistent-settings area used
+ * by lib_storage / NFC commissioning, and is preserved across an app firmware
+ * update. Stored as a fixed 64-byte record at offset 0 via lib_memory_area:
+ *   [0..3] magic  [4] wire length  [5..47] wire  [48..51] CRC32(bytes 0..47). */
+#define UMB_AREA_ID     0x8AE573BAu
+#define UMB_AREA_MAGIC  0x554D4234u   /* "UMB4" */
+#define UMB_REC_SIZE    64u           /* 4-aligned; holds 5 + wire(<=43) + crc */
+
+static void umb_area_wait(void)
+{
+    if (lib_memory_area == NULL) return;
+    while (lib_memory_area->isBusy(UMB_AREA_ID)) { }
+}
+
+/* Load the persisted UMB config into m_umb_cfg. Returns true if a valid record
+ * was found and applied. */
+static bool umb_area_read(void)
+{
+    if (lib_memory_area == NULL) return false;
+    uint8_t buf[UMB_REC_SIZE];
+    if (lib_memory_area->startRead(UMB_AREA_ID, buf, 0u, UMB_REC_SIZE)
+            != APP_LIB_MEM_AREA_RES_OK) return false;
+    umb_area_wait();
+
+    uint32_t magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8)
+                   | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    if (magic != UMB_AREA_MAGIC) return false;
+    uint8_t len = buf[4];
+    if (len == 0u || len > UMB_CFG_WIRE_MAX) return false;
+    uint32_t crc = (uint32_t)buf[48] | ((uint32_t)buf[49] << 8)
+                 | ((uint32_t)buf[50] << 16) | ((uint32_t)buf[51] << 24);
+    if (crc != nfc_crc32(buf, 48u)) return false;
+
+    return umb_config_parse(&buf[5], len, &m_umb_cfg);
+}
+
+/* Persist the pushed UMB config wire blob. Returns true on a verified write. */
+static bool umb_area_write(const uint8_t * wire, uint8_t len)
+{
+    if (lib_memory_area == NULL || wire == NULL
+        || len == 0u || len > UMB_CFG_WIRE_MAX) return false;
+
+    uint8_t buf[UMB_REC_SIZE];
+    memset(buf, 0, sizeof buf);
+    buf[0] = (uint8_t)(UMB_AREA_MAGIC & 0xFFu);
+    buf[1] = (uint8_t)(UMB_AREA_MAGIC >> 8);
+    buf[2] = (uint8_t)(UMB_AREA_MAGIC >> 16);
+    buf[3] = (uint8_t)(UMB_AREA_MAGIC >> 24);
+    buf[4] = len;
+    memcpy(&buf[5], wire, len);
+    uint32_t crc = nfc_crc32(buf, 48u);
+    buf[48] = (uint8_t)(crc & 0xFFu);
+    buf[49] = (uint8_t)(crc >> 8);
+    buf[50] = (uint8_t)(crc >> 16);
+    buf[51] = (uint8_t)(crc >> 24);
+
+    app_lib_mem_area_info_t info;
+    if (lib_memory_area->getAreaInfo(UMB_AREA_ID, &info) != APP_LIB_MEM_AREA_RES_OK)
+        return false;
+
+    /* Erase the first sector only if the medium requires it (RRAM does not). */
+    if (info.flash.erase_sector_size > 0u)
+    {
+        uint32_t base = 0u;
+        size_t   nsec = 1u;
+        (void)lib_memory_area->startErase(UMB_AREA_ID, &base, &nsec);
+        umb_area_wait();
+    }
+
+    if (lib_memory_area->startWrite(UMB_AREA_ID, 0u, buf, UMB_REC_SIZE)
+            != APP_LIB_MEM_AREA_RES_OK) return false;
+    umb_area_wait();
+
+    uint8_t rb[UMB_REC_SIZE];
+    if (lib_memory_area->startRead(UMB_AREA_ID, rb, 0u, UMB_REC_SIZE)
+            != APP_LIB_MEM_AREA_RES_OK) return false;
+    umb_area_wait();
+    return memcmp(rb, buf, UMB_REC_SIZE) == 0;
 }
 
 static uint32_t led_red_off_task(void);  /* used as a persist-failure cue */
@@ -327,10 +446,10 @@ static void nfc_commissioning_apply(void)
     }
 
     /* Persist for the next boot — the stack is running here so the settings
-     * setters would fail. apply_pending_commissioning() applies it in App_init. */
+     * setters would fail. apply_pending_commissioning() applies it in App_init.
+     * Read-modify-write so the durable UMB config section is preserved. */
     nfc_commission_store_t store;
-    memset(&store, 0, sizeof(store));
-    store.magic    = NFC_COMMISSION_MAGIC;
+    nfc_store_load(&store);
     store.net      = (uint32_t)net_addr;
     store.addr     = (uint32_t)node_addr;
     store.ch       = (uint8_t)channel;
@@ -359,41 +478,45 @@ static void nfc_commissioning_apply(void)
     NVIC_SystemReset();
 }
 
-/* Apply (and clear) any NFC commissioning staged in persistent storage.
- * Must be called from App_init, before startStack, while the stack is stopped. */
+/* At boot: load the durable UMB config, and apply (once) any staged NFC
+ * commissioning. Must be called from App_init, before startStack.
+ * m_umb_cfg must already hold defaults (see App_init order). */
 static void apply_pending_commissioning(void)
 {
     if (lib_storage == NULL) return;
 
     nfc_commission_store_t s;
     if (lib_storage->readPersistent(&s, sizeof(s)) != APP_RES_OK) return;
-    if (s.magic != NFC_COMMISSION_MAGIC) return;   /* nothing staged */
+    if (s.magic != NFC_COMMISSION_MAGIC) return;   /* nothing stored */
 
-    /* Discard anything that does not pass CRC + range validation, so corrupt
-     * flash can never be applied nor re-applied on subsequent boots. */
+    /* Discard anything that does not pass CRC + range validation. */
     if (!nfc_store_valid(&s))
     {
-        LOG(LVL_ERROR, CRED "NFC commissioning: corrupt record discarded" C0);
+        LOG(LVL_ERROR, CRED "persistent record corrupt — discarded" C0);
         nfc_store_clear();
         return;
     }
 
-    app_res_e r1 = lib_settings->setNetworkAddress((app_lib_settings_net_addr_t)s.net);
-    app_res_e r2 = lib_settings->setNetworkChannel((app_lib_settings_net_channel_t)s.ch);
-    app_res_e r3 = APP_RES_OK;
-    if (s.set_addr)
-        r3 = lib_settings->setNodeAddress((app_addr_t)s.addr);
+    /* One-shot commissioning: apply, then clear the commissioning fields. */
+    if (nfc_store_commission_pending(&s))
+    {
+        uint32_t a_net = s.net; uint8_t a_ch = s.ch; uint8_t a_sa = s.set_addr;
+        app_res_e r1 = lib_settings->setNetworkAddress((app_lib_settings_net_addr_t)s.net);
+        app_res_e r2 = lib_settings->setNetworkChannel((app_lib_settings_net_channel_t)s.ch);
+        app_res_e r3 = APP_RES_OK;
+        if (s.set_addr)
+            r3 = lib_settings->setNodeAddress((app_addr_t)s.addr);
 
-    /* Clear with verification so it is applied exactly once. If clearing somehow
-     * fails the same valid values would simply re-apply next boot (idempotent),
-     * never garbage — but log it as it would mask later Remote-API changes. */
-    if (!nfc_store_clear())
-        LOG(LVL_ERROR, CRED "NFC commissioning: clear failed (will re-apply)" C0);
+        s.net = 0u; s.addr = 0u; s.set_addr = 0u;   /* clear commissioning only */
+        s.crc = nfc_store_crc(&s);
+        if (!nfc_store_write(&s))
+            LOG(LVL_ERROR, CRED "commissioning: clear failed (will re-apply)" C0);
 
-    LOG(LVL_INFO,
-        CCYN CBOLD "NFC commissioning applied: net=0x%06X ch=%u%s (r=%d/%d/%d)" C0,
-        (unsigned)s.net, (unsigned)s.ch, s.set_addr ? " (addr)" : "",
-        (int)r1, (int)r2, (int)r3);
+        LOG(LVL_INFO,
+            CCYN CBOLD "NFC commissioning applied: net=0x%06X ch=%u%s (r=%d/%d/%d)" C0,
+            (unsigned)a_net, (unsigned)a_ch, a_sa ? " (addr)" : "",
+            (int)r1, (int)r2, (int)r3);
+    }
 }
 
 /* Build and write an NDEF text record into m_nfc_memory[T2_HEADER_SIZE..].
@@ -654,13 +777,13 @@ static void i2c_bus_diag(void)
 {
     i2c_conf_t cfg = { .clock = 100000u, .pullup = true };
     i2c_res_e ir = I2C_init(&cfg);
-    LOG(LVL_INFO, CYEL "I2C diag: init=%d (0=OK 4=ALREADY)" C0, (int)ir);
+    LOG(LVL_DEBUG, CYEL "I2C diag: init=%d (0=OK 4=ALREADY)" C0, (int)ir);
 
     uint8_t b;
     i2c_xfer_t probe = { .address = 0x41u /* AEM10900 addr */, .write_ptr = NULL,
                          .write_size = 0u, .read_ptr = &b, .read_size = 1u };
     i2c_res_e pr = I2C_transfer(&probe, NULL);
-    LOG(LVL_INFO, CYEL "I2C 0x2D probe=%d (0=OK 6=ANACK 7=DNACK 8=BUS_HANG)" C0, (int)pr);
+    LOG(LVL_DEBUG, CYEL "I2C 0x2D probe=%d (0=OK 6=ANACK 7=DNACK 8=BUS_HANG)" C0, (int)pr);
 
     uint8_t found = 0u;
     for (uint8_t a = 0x08u; a <= 0x77u; a++)
@@ -674,7 +797,7 @@ static void i2c_bus_diag(void)
             found++;
         }
     }
-    LOG(LVL_INFO, CYEL "I2C scan: %u device(s) on the bus" C0, found);
+    LOG(LVL_DEBUG, CYEL "I2C scan: %u device(s) on the bus" C0, found);
 }
 
 /* Median of 5 — rejects up to 2 outliers (I2C glitches / register transients). */
@@ -724,7 +847,7 @@ static uint32_t energy_monitor_task(void)
         r = AEM10900_init(&m_pmic_cfg);
         if (r != AEM10900_RES_OK)
         {
-            LOG(LVL_WARNING,
+            LOG(LVL_DEBUG,
                 CRED "AEM10900 init error %d (1=I2C_ERR 3=SYNC_TIMEOUT) — retry in 10s" C0,
                 (int)r);
             /* On the first failure, dump a low-level bus diagnostic. */
@@ -895,7 +1018,7 @@ static uint32_t beacon_tx_task(void)
         lib_beacon_tx->setBeaconContents(0, pdu, i);
         lib_beacon_tx->enableBeacons(true);
         m_beacon_tx_started = true;
-        LOG(LVL_INFO,
+        LOG(LVL_DEBUG,
             CBOLD CBLU "BLE beacon enabled (no PMIC) addr=0x%08x " CDEC "(%u) "
             CBLU "UUID=0x%04x" C0, addr, addr, BEACON_SERVICE_UUID);
     }
@@ -913,6 +1036,9 @@ static uint32_t beacon_tx_task(void)
 #define EP_HEARTBEAT   10   /* periodic uplink counter              */
 #define EP_SENSOR_CBOR 11   /* periodic CTN [T_C, R_T, diag] as CBOR array */
 #define EP_IRRADIANCE  12   /* periodic SP-110 [W/m2, mV, diag] as CBOR array */
+#define EP_WIND_CBOR   13   /* Davis 6410 [speed_ms, gust_ms, dir_deg] as CBOR  */
+#define EP_UMB_DATA    14   /* UMB readings: CBOR array of [channel, value] pairs */
+#define EP_UMB_CFG     50   /* downlink: upload UMB polling config (wire format)  */
 
 /* ── Protocol constants ─────────────────────────────────────────────────────── */
 #define FRAME_STX           0x02U
@@ -1142,6 +1268,236 @@ static void send_irradiance_uplink(void)
 }
 #endif /* USE_ADS1220 */
 
+#if defined(USE_DAVIS6410)
+/* ── Davis 6410/6415 anemometer + wind vane ────────────────────────────────── */
+#define WIND_SAMPLE_MS   3000U    /* instantaneous-speed window (per Davis, ~2-3 s) */
+#define WIND_REPORT_MS  60000U    /* PARAMETRABLE: gust window + uplink cadence      */
+#define WIND_EXEC_US     2000U
+
+static float    m_wind_speed_ms = 0.0f;   /* latest instantaneous speed */
+static float    m_wind_gust_ms  = 0.0f;   /* max over the current report window */
+static float    m_wind_dir_deg  = 0.0f;
+static uint32_t m_wind_elapsed  = 0U;
+
+/* Speed reed-switch interrupt: count a pulse (debounced in the driver). */
+static void wind_speed_gpio_cb(gpio_id_t id, gpio_in_event_e event)
+{
+    (void)id;
+    if (IS_FALLING_EDGE(event))
+        Davis6410_on_pulse();
+}
+
+/* Send [speed_ms, gust_ms, dir_deg] on EP_WIND_CBOR (EP 13). */
+static void send_wind_cbor_uplink(void)
+{
+    uint8_t buf[32];
+    CborEncoder enc, arr;
+    cbor_encoder_init(&enc, buf, sizeof(buf), 0);
+    cbor_encoder_create_array(&enc, &arr, 3);
+    cbor_encode_float(&arr, m_wind_speed_ms);
+    cbor_encode_float(&arr, m_wind_gust_ms);
+    cbor_encode_float(&arr, m_wind_dir_deg);
+    cbor_encoder_close_container(&enc, &arr);
+
+    size_t len = cbor_encoder_get_buffer_size(&enc, buf);
+    app_lib_data_to_send_t pkt = {
+        .bytes         = buf,
+        .num_bytes     = len,
+        .dest_address  = APP_ADDR_ANYSINK,
+        .src_endpoint  = EP_WIND_CBOR,
+        .dest_endpoint = EP_WIND_CBOR,
+        .qos           = APP_LIB_DATA_QOS_NORMAL,
+        .flags         = APP_LIB_DATA_SEND_FLAG_NONE,
+        .tracking_id   = APP_LIB_DATA_NO_TRACKING_ID,
+    };
+    Shared_Data_sendData(&pkt, NULL);
+}
+
+/* Periodic: sample instantaneous speed, track the gust (max) over the report
+ * window, and every WIND_REPORT_MS read the vane and uplink [speed, gust, dir]. */
+static uint32_t wind_task(void)
+{
+    m_wind_speed_ms = Davis6410_sample_speed_ms(WIND_SAMPLE_MS);
+    if (m_wind_speed_ms > m_wind_gust_ms) m_wind_gust_ms = m_wind_speed_ms;
+    m_wind_elapsed += WIND_SAMPLE_MS;
+
+    if (m_wind_elapsed >= WIND_REPORT_MS)
+    {
+        float d = Davis6410_read_direction_deg();
+        if (d >= 0.0f) m_wind_dir_deg = d;
+
+        char bv[16], bg[16], bd[16];
+        LOG(LVL_INFO, "WIND: v=%s m/s  gust=%s m/s  dir=%s deg",
+            fixed_str(bv, sizeof bv, m_wind_speed_ms, 2),
+            fixed_str(bg, sizeof bg, m_wind_gust_ms, 2),
+            fixed_str(bd, sizeof bd, m_wind_dir_deg, 0));
+
+        send_wind_cbor_uplink();
+        m_wind_gust_ms = 0.0f;
+        m_wind_elapsed = 0U;
+    }
+    return WIND_SAMPLE_MS;
+}
+#endif /* USE_DAVIS6410 */
+
+/* ── UMB (OTT/Lufft) meteorological sensors over RS485 @ 19200 ─────────────────
+ * Config (devices, addresses, channels, cadence) is uploaded by a downlink
+ * command on EP_UMB_CFG (see downlink_cb), applied live and persisted when small
+ * enough. Each round the task runs one Multi-Channel Online Data Request (2Fh)
+ * per configured device (e.g. WS501 @0x7001, WS100 @0x7002) and uplinks that
+ * device's readings as CBOR [dev_addr, ch, value, ...] on EP_UMB_DATA. */
+static float        m_umb_value[UMB_CFG_MAX_CH_PER_DEV];
+static bool         m_umb_valid[UMB_CFG_MAX_CH_PER_DEV];
+static uint8_t      m_umb_dev_idx = 0;
+static bool         m_umb_waiting = false;
+
+#define UMB_RESP_WAIT_MS   600U    /* > long-response ta (500 ms) + margin      */
+#define UMB_GAP_MS          60U    /* gap between devices (>= 3 char times)     */
+#define UMB_EXEC_US       1500U
+
+static uint32_t umb_round_period_ms(void)
+{
+    uint32_t p = (uint32_t)m_umb_cfg.poll_period_s * 1000u;
+    return p ? p : 60000u;
+}
+
+/* Uplink one device's readings: CBOR [dev_addr(uint), ch0(uint), v0(float), …];
+ * a channel with no valid reading is encoded as null. */
+static void send_umb_cbor_uplink(const umb_dev_cfg_t * d)
+{
+    uint8_t buf[128];
+    CborEncoder enc, arr;
+    cbor_encoder_init(&enc, buf, sizeof buf, 0);
+    cbor_encoder_create_array(&enc, &arr, 1u + (size_t)d->num_channels * 2u);
+    cbor_encode_uint(&arr, d->dev_addr);
+    for (uint8_t i = 0; i < d->num_channels; i++)
+    {
+        cbor_encode_uint(&arr, d->channel[i]);
+        if (m_umb_valid[i]) cbor_encode_float(&arr, m_umb_value[i]);
+        else                cbor_encode_null(&arr);
+    }
+    cbor_encoder_close_container(&enc, &arr);
+
+    size_t len = cbor_encoder_get_buffer_size(&enc, buf);
+    app_lib_data_to_send_t pkt = {
+        .bytes         = buf,
+        .num_bytes     = len,
+        .dest_address  = APP_ADDR_ANYSINK,
+        .src_endpoint  = EP_UMB_DATA,
+        .dest_endpoint = EP_UMB_DATA,
+        .qos           = APP_LIB_DATA_QOS_NORMAL,
+        .flags         = APP_LIB_DATA_SEND_FLAG_NONE,
+        .tracking_id   = APP_LIB_DATA_NO_TRACKING_ID,
+    };
+    Shared_Data_sendData(&pkt, NULL);
+}
+
+/* Put a UMB request on the bus (no motor reply-settle); reply read next tick. */
+static void umb_send(const uint8_t * req, uint8_t n)
+{
+    de_tx();
+    (void)rs485_uart_send(req, n);
+    de_rx();
+    rs485_uart_rx_arm();
+}
+
+/* Format up to 40 bytes as hex into out for logging. */
+static const char * umb_hex(char * out, size_t outsz, const uint8_t * p, uint8_t n)
+{
+    static const char H[] = "0123456789ABCDEF";
+    uint8_t  max = (n > 80u) ? 80u : n;
+    size_t   o   = 0;
+    for (uint8_t i = 0; i < max && o + 3u < outsz; i++)
+    {
+        out[o++] = H[p[i] >> 4];
+        out[o++] = H[p[i] & 0x0Fu];
+        out[o++] = ' ';
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/* Advance to the next device; returns the delay until the next task run. */
+static uint32_t umb_next_device(void)
+{
+    m_umb_waiting = false;
+    m_umb_dev_idx++;
+    if (m_umb_dev_idx >= m_umb_cfg.num_devs)
+    {
+        m_umb_dev_idx = 0;
+        return umb_round_period_ms();
+    }
+    return UMB_GAP_MS;
+}
+
+/* Multi-device poll: one 2Fh transaction per device, two-phase (send / read).
+ * One CBOR uplink per device; a full round every poll_period_s. */
+static uint32_t umb_poll_task(void)
+{
+    if (!m_umb_cfg.enabled || m_umb_cfg.num_devs == 0u)
+    {
+        m_umb_waiting = false;
+        m_umb_dev_idx = 0;
+        return umb_round_period_ms();
+    }
+
+    umb_dev_cfg_t * d = &m_umb_cfg.dev[m_umb_dev_idx];
+    if (d->num_channels == 0u) return umb_next_device();  /* nothing to poll */
+
+    if (!m_umb_waiting)
+    {
+        uint8_t req[UMB_MAX_FRAME];
+        uint8_t n = umb_build_multi_request(req, sizeof req, d->dev_addr,
+                                            UMB_CONTROLLER_ADDR,
+                                            d->channel, d->num_channels);
+        if (n > 0u) umb_send(req, n);
+        char hx[256];
+        LOG(LVL_DEBUG, "UMB TX 0x%04x %uB: %s",
+            d->dev_addr, n, umb_hex(hx, sizeof hx, req, n));
+        m_umb_waiting = true;
+        return UMB_RESP_WAIT_MS;
+    }
+
+    const uint8_t * frame = NULL;
+    uint8_t total = rs485_uart_rx_stop();
+    (void)rs485_uart_rx_check(total, &frame);   /* frame -> raw RX buffer start */
+
+    {
+        char hx[256];
+        LOG(LVL_INFO, "UMB RX 0x%04x %uB: %s", d->dev_addr, total,
+            (frame != NULL && total > 0u) ? umb_hex(hx, sizeof hx, frame, total)
+                                          : "(none)");
+    }
+
+    umb_value_t vals[UMB_CFG_MAX_CH_PER_DEV];
+    uint8_t got = (frame != NULL)
+                ? umb_parse_multi_response(frame, total, vals, UMB_CFG_MAX_CH_PER_DEV)
+                : 0u;
+    /* Aggregate all channels on ONE line ("ch=val ...") to avoid overflowing the
+     * log UART FIFO (which drops the tail when many lines print in one tick). */
+    char   line[176];
+    size_t o = 0;
+    for (uint8_t i = 0; i < d->num_channels; i++)
+    {
+        bool ok = (i < got) && (vals[i].status == 0x00u);
+        m_umb_valid[i] = ok;
+        m_umb_value[i] = ok ? vals[i].value : 0.0f;
+
+        char b[20];
+        int  w = ok
+               ? snprintf(line + o, sizeof(line) - o, "%u=%s ",
+                          d->channel[i], fixed_str(b, sizeof b, vals[i].value, 2))
+               : snprintf(line + o, sizeof(line) - o, "%u=ERR ", d->channel[i]);
+        if (w > 0 && (size_t)w < sizeof(line) - o) o += (size_t)w;
+    }
+    LOG(LVL_INFO, "UMB 0x%04x %u/%u (%uB): %s",
+        d->dev_addr, got, d->num_channels, total, line);
+
+    rs485_uart_rx_arm();
+    send_umb_cbor_uplink(d);
+    return umb_next_device();
+}
+
 #if defined(USE_AEM10900)
 /* Send the AEM10900 PMIC snapshot to the Wirepas sink on EP_PMIC_CBOR (EP 9) as
  * a CBOR array: [vsto (float V), vsrc (float V), temp (float °C),
@@ -1258,7 +1614,7 @@ static bool ad_has_uuid16(const uint8_t * ads, uint8_t len, uint16_t uuid)
 }
 
 /* Log a single AD structure — called from cooperative context */
-static void ad_log_one(uint8_t ad_type, const uint8_t * d, uint8_t dlen)
+static void __attribute__((unused)) ad_log_one(uint8_t ad_type, const uint8_t * d, uint8_t dlen)
 {
     switch (ad_type)
     {
@@ -1396,20 +1752,24 @@ static void brx_log_entry(const brx_entry_t * e)
 
     if (!uuid_match) return;
 
+#if BLE_RX_VERBOSE
     LOG(LVL_INFO,
         CBOLD CBLU "BLE RX addr=%02X:%02X:%02X:%02X:%02X:%02X  rssi=%d dBm" C0,
         e->data[5], e->data[4], e->data[3],
         e->data[2], e->data[1], e->data[0],
         (int)e->rssi);
+#endif
 
-    /* UUID matched — full decode of all ADs */
+    /* Walk the AD list: (optionally) log each, and always handle any command. */
     uint8_t pos = 0;
     while (pos + 1u < ads_len)
     {
         uint8_t ad_len  = ads[pos];
         uint8_t ad_type = ads[pos + 1u];
         if (ad_len == 0u || pos + ad_len >= ads_len) break;
+#if BLE_RX_VERBOSE
         ad_log_one(ad_type, &ads[pos + 2u], ad_len - 1u);
+#endif
         if (ad_type == 0xFFu)
             brx_handle_command(&ads[pos + 2u], ad_len - 1u);
         pos += ad_len + 1u;
@@ -1432,8 +1792,23 @@ static uint32_t poll_task(void)
     if (!lib_beacon_rx->isScannerStarted())
     {
         app_res_e r = lib_beacon_rx->startScanner(APP_LIB_BEACON_RX_CHANNEL_ALL);
-        LOG(LVL_INFO, "BLE scanner start: %d", r);
+        LOG(LVL_DEBUG, "BLE scanner start: %d", r);
     }
+
+#if defined(USE_DAVIS6410)
+    /* Wind-speed reed by polling: count each high→low transition (reed closes to
+     * GND). Sampled every POLL_PERIOD_MS (5 ms) — fine up to the reed's ~90 Hz. */
+    {
+        static bool  wind_prev_high = true;
+        gpio_level_e lvl;
+        if (Gpio_inputRead(BOARD_GPIO_ID_WIND_SPEED, &lvl) == GPIO_RES_OK)
+        {
+            bool high = (lvl == GPIO_LEVEL_HIGH);
+            if (wind_prev_high && !high) Davis6410_on_pulse();
+            wind_prev_high = high;
+        }
+    }
+#endif
 
     if (m_reply_ticks_left > 0U)
     {
@@ -1556,7 +1931,7 @@ static void sensor_read_accel(void)
     float y_mg = (acc.y >> 2) * 0.244f;
     float z_mg = (acc.z >> 2) * 0.244f;
     char bx[24], by[24], bz[24];
-    LOG(LVL_INFO, CMAG "ACC  x=%s y=%s z=%s mg" C0,
+    LOG(LVL_DEBUG, CMAG "ACC  x=%s y=%s z=%s mg" C0,
         fixed_str(bx, sizeof bx, x_mg, 1),
         fixed_str(by, sizeof by, y_mg, 1),
         fixed_str(bz, sizeof bz, z_mg, 1));
@@ -1599,7 +1974,7 @@ static void sensor_finalize_ctn(int32_t code)
         m_sensor.ctn_temp_c = ctn_ohms_to_celsius(r_t);
         m_sensor.ctn_diag   = 0u;
         char bt[24];
-        LOG(LVL_INFO, CMAG "CTN  code=%ld  R=%ld ohm  T=%s C" C0,
+        LOG(LVL_DEBUG, CMAG "CTN  code=%ld  R=%ld ohm  T=%s C" C0,
             (long)code, (long)(r_t + 0.5f),
             fixed_str(bt, sizeof bt, m_sensor.ctn_temp_c, 2));
     }
@@ -1608,7 +1983,7 @@ static void sensor_finalize_ctn(int32_t code)
         m_sensor.ctn_ohm    = -1.0f;
         m_sensor.ctn_temp_c = -999.0f;
         m_sensor.ctn_diag   = 1u;
-        LOG(LVL_WARNING, CRED "CTN probe fault (code=%ld)" C0, (long)code);
+        LOG(LVL_DEBUG, CRED "CTN probe fault (code=%ld)" C0, (long)code);
     }
 }
 
@@ -1621,7 +1996,7 @@ static void sensor_finalize_sp110(int32_t code)
     else if ((float)code >= 0.99f * ADS_FS) m_sensor.irr_diag = 1u;
     else                                    m_sensor.irr_diag = 0u;
     char bv[24], bw[24];
-    LOG(LVL_INFO, CMAG "SP110 code=%ld  V=%s mV  E=%s W/m2" C0,
+    LOG(LVL_DEBUG, CMAG "SP110 code=%ld  V=%s mV  E=%s W/m2" C0,
         (long)code,
         fixed_str(bv, sizeof bv, v_mv, 3),
         fixed_str(bw, sizeof bw, m_sensor.irr_wm2, 1));
@@ -1669,7 +2044,10 @@ static app_lib_data_receive_res_e downlink_cb(
     Gpio_outputWrite(BOARD_GPIO_ID_LED_RED, GPIO_LEVEL_HIGH);
     App_Scheduler_addTask_execTime(led_red_off_task, 50U, 100U);
 
-    if (data->num_bytes == 0U || data->num_bytes > FRAME_MAX_LEN)
+    /* Reject only empty frames here. The FRAME_MAX_LEN motor-frame limit is
+     * enforced inside the EP_RS485_DOWN branch, so larger app commands (e.g. the
+     * UMB config on EP_UMB_CFG, up to ~43 B) are not dropped before dispatch. */
+    if (data->num_bytes == 0U)
         return APP_LIB_DATA_RECEIVE_RES_NOT_FOR_APP;
 
     const char * pkt_type;
@@ -1699,6 +2077,30 @@ static app_lib_data_receive_res_e downlink_cb(
         data->hops,
         data->delay * 1000u / 128u,
         (unsigned)data->num_bytes);
+
+    /* UMB polling config upload (dedicated command). Parse the wire format,
+     * apply live and restart the polling round. */
+    if (data->dest_endpoint == EP_UMB_CFG)
+    {
+        umb_config_t nc;
+        if (umb_config_parse(data->bytes, (uint8_t)data->num_bytes, &nc))
+        {
+            m_umb_cfg     = nc;
+            m_umb_waiting = false;
+            m_umb_dev_idx = 0;
+            bool persisted = umb_area_write(data->bytes, (uint8_t)data->num_bytes);
+            LOG(LVL_INFO, CGRN "UMB cfg: en=%u period=%us devs=%u (persist=%s)" C0,
+                m_umb_cfg.enabled, m_umb_cfg.poll_period_s, m_umb_cfg.num_devs,
+                persisted ? "flash" : "FAIL");
+            App_Scheduler_addTask_execTime(umb_poll_task, 500U, UMB_EXEC_US);
+        }
+        else
+        {
+            LOG(LVL_WARNING, CRED "UMB cfg: invalid (%u B)" C0,
+                (unsigned)data->num_bytes);
+        }
+        return APP_LIB_DATA_RECEIVE_RES_HANDLED;
+    }
 
     /* Only EP_RS485_DOWN commands are forwarded to the motor controller.
      * Other endpoints (e.g. EP 10 broadcasts from peer nodes) are logged
@@ -1849,6 +2251,22 @@ static void switch_gpio_cb(gpio_id_t id, gpio_in_event_e event)
     }
 }
 
+/* Diagnostic: log the mesh route state so we can see if the node is joined and
+ * routable (downlink needs a VALID route to a sink). */
+static uint32_t route_dbg_task(void)
+{
+    app_lib_state_route_info_t ri;
+    if (lib_state->getRouteInfo(&ri) == APP_RES_OK)
+    {
+        const char * st = (ri.state == APP_LIB_STATE_ROUTE_STATE_VALID)   ? "VALID"
+                        : (ri.state == APP_LIB_STATE_ROUTE_STATE_PENDING) ? "PENDING"
+                        :                                                   "INVALID";
+        LOG(LVL_DEBUG, CYEL "ROUTE: %s cost=%u nexthop=0x%08x sink=0x%08x ch=%u" C0,
+            st, ri.cost, ri.next_hop, ri.sink, ri.channel);
+    }
+    return 5000u;
+}
+
 /* ── App entry point ─────────────────────────────────────────────────────────── */
 void App_init(const app_global_functions_t * functions)
 {
@@ -1867,6 +2285,13 @@ void App_init(const app_global_functions_t * functions)
     }
 
     configureNodeFromBuildParameters();
+
+    /* UMB polling config: defaults, then restore from the app_persistent user
+     * area (separate from commissioning; survives an app firmware update). */
+    umb_config_defaults(&m_umb_cfg);
+    if (umb_area_read())
+        LOG(LVL_INFO, CCYN "UMB config restored: period=%us devs=%u" C0,
+            m_umb_cfg.poll_period_s, m_umb_cfg.num_devs);
 
     /* Override net/ch/addr with any NFC commissioning staged before reboot.
      * Done after configureNode (which only sets unset values) so NFC wins. */
@@ -1900,6 +2325,28 @@ void App_init(const app_global_functions_t * functions)
     };
     Gpio_inputSetCfg(BOARD_GPIO_ID_SWITCH, &switch_cfg);
 
+#if defined(USE_DAVIS6410)
+    /* Wind-vane pot supply: push-pull output, default LOW (powered only during a
+     * direction read). */
+    static const gpio_out_cfg_t wind_pot_cfg = {
+        .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
+        .level_default = GPIO_LEVEL_LOW,
+    };
+    Gpio_outputSetCfg(BOARD_GPIO_ID_WIND_POT_PWR, &wind_pot_cfg);
+
+    /* Wind-speed reed: pull-up input, NO edge IRQ. The GPIO PORT/sense interrupt
+     * is unreliable for P2 on this HAL/nRF54L15, so falling edges (reed closes to
+     * GND) are detected by polling in poll_task (every POLL_PERIOD_MS). */
+    static const gpio_in_cfg_t wind_speed_cfg = {
+        .event_cb    = wind_speed_gpio_cb,       /* kept referenced; never fires  */
+        .event_cfg   = GPIO_IN_EVENT_NONE,
+        .in_mode_cfg = GPIO_IN_PULL_UP,
+    };
+    Gpio_inputSetCfg(BOARD_GPIO_ID_WIND_SPEED, &wind_speed_cfg);
+
+    Davis6410_init(BOARD_GPIO_ID_WIND_POT_PWR);
+#endif
+
     /* RS485 DE: push-pull output, initially LOW (receive mode) */
     static const gpio_out_cfg_t de_cfg = {
         .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
@@ -1907,7 +2354,7 @@ void App_init(const app_global_functions_t * functions)
     };
     Gpio_outputSetCfg(BOARD_GPIO_ID_RS485_DE, &de_cfg);
 
-    /* RS485 UART: UARTE20 on P1.04 / P1.05 at 115200 baud */
+    /* RS485 UART: UARTE20 on P1.04 / P1.05 at 19200 baud (UMB) */
     rs485_uart_init();
     rs485_uart_rx_arm();   /* start listening immediately */
 
@@ -1994,6 +2441,18 @@ void App_init(const app_global_functions_t * functions)
                                    APP_SCHEDULER_SCHEDULE_ASAP,
                                    ENERGY_MONITOR_EXEC_US);
 #endif
+
+#if defined(USE_DAVIS6410)
+    /* Davis wind: sample speed every WIND_SAMPLE_MS, uplink every WIND_REPORT_MS. */
+    App_Scheduler_addTask_execTime(wind_task, WIND_SAMPLE_MS, WIND_EXEC_US);
+#endif
+
+    /* Diagnostic: periodic mesh route state (joined? cost? next hop?). */
+    App_Scheduler_addTask_execTime(route_dbg_task, 3000U, 300U);
+
+    /* UMB sensor polling: runs from the persisted/uploaded config (loaded above).
+     * The task self-reschedules; it is (re)armed with the new cadence on config. */
+    App_Scheduler_addTask_execTime(umb_poll_task, 2000U, UMB_EXEC_US);
 
     /* BLE beacon TX — Wirepas network info, always on (independent of the PMIC). */
     App_Scheduler_addTask_execTime(beacon_tx_task,

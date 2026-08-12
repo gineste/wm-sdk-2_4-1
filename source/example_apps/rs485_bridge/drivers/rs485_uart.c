@@ -35,7 +35,10 @@
  * DMA.RX.AMOUNT counter only latches at STOP/END, so we never rely on it for
  * mid-frame progress.  Instead the buffer is cleared to 0x00 before each arm and
  * scanned live for a complete STX..END protocol frame (see rs485_uart_rx_frame). */
-#define RS485_RX_BUF_LEN  32U
+/* Sized for full UMB responses: a Multi-Channel (2Fh) reply with several Float64
+ * channels (e.g. WS100 precipitation) reaches ~70-120 bytes. Kept < 255 so the
+ * uint8_t byte counts (rx_stop/total) never wrap. */
+#define RS485_RX_BUF_LEN  200U
 static uint8_t m_rx_buf[RS485_RX_BUF_LEN] __attribute__((aligned(4)));
 
 /* Extract NRF_Px GPIO bank from the Wirepas/nRF54L15 pin encoding. */
@@ -69,7 +72,8 @@ void rs485_uart_init(void)
     NRF_UARTE20->PSEL.CTS = 0xFFFFFFFFUL;
     NRF_UARTE20->PSEL.RTS = 0xFFFFFFFFUL;
 
-    NRF_UARTE20->BAUDRATE = UARTE_BAUDRATE_BAUDRATE_Baud115200;
+    /* UMB physical layer: 19200 baud, 8N1 (this build talks UMB, not the motor). */
+    NRF_UARTE20->BAUDRATE = UARTE_BAUDRATE_BAUDRATE_Baud19200;
 
     /* 8N1, no flow control.
      * FRAMETIMEOUT_ENABLED: fires EVENTS_FRAMETIMEOUT after N idle bits on RX,

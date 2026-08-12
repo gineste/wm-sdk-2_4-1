@@ -5,7 +5,10 @@ SRCS += source/example_apps/rs485_bridge/drivers/nfc_hw_nrf54l15.c \
         source/example_apps/rs485_bridge/drivers/aem10900.c \
         source/example_apps/rs485_bridge/drivers/lis2dw.c \
         source/example_apps/rs485_bridge/drivers/ads1220.c \
-        source/example_apps/rs485_bridge/drivers/rs485_uart.c
+        source/example_apps/rs485_bridge/drivers/rs485_uart.c \
+        source/example_apps/rs485_bridge/drivers/davis6410.c \
+        source/example_apps/rs485_bridge/drivers/umb.c \
+        source/example_apps/rs485_bridge/drivers/umb_config.c
 
 INCLUDES += -Isource/example_apps/rs485_bridge/drivers
 # NFC lib path goes in CFLAGS so it comes after util/ in the search order,
