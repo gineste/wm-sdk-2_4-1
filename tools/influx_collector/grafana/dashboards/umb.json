@@ -14,7 +14,31 @@
     "to": "now"
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"sensors\", tag: \"node\")",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
   },
   "annotations": {
     "list": []
@@ -48,7 +72,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" or r._measurement == \"davis\" or r._measurement == \"gauge\" or r._measurement == \"pt100\")\n  |> last()\n  |> keep(columns: [\"_measurement\",\"umb_model\",\"_field\",\"_value\"])\n  |> group() |> sort(columns: [\"_measurement\",\"umb_model\",\"_field\"])"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" or r._measurement == \"davis\" or r._measurement == \"gauge\" or r._measurement == \"pt100\")\n  |> last()\n  |> keep(columns: [\"_measurement\",\"node\",\"umb_model\",\"_field\",\"_value\"])\n  |> group() |> sort(columns: [\"_measurement\",\"node\",\"umb_model\",\"_field\"])"
         }
       ]
     },
@@ -99,7 +123,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"air_temp_avg_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"air_temp_avg_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -150,7 +174,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"humidity_avg_pct\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"humidity_avg_pct\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -201,7 +225,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"pressure_rel_avg_hpa\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"pressure_rel_avg_hpa\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -252,7 +276,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"global_rad_avg_wm2\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"global_rad_avg_wm2\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -303,7 +327,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"wind_speed_avg_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"wind_speed_avg_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         },
         {
           "datasource": {
@@ -311,7 +335,7 @@
             "uid": "influxdb"
           },
           "refId": "B",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"davis\")\n  |> filter(fn: (r) => r._field == \"wind_speed_ms\" or r._field == \"wind_gust_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"davis\")\n  |> filter(fn: (r) => r._field == \"wind_speed_ms\" or r._field == \"wind_gust_ms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -362,7 +386,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"wind_dir_max_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS501\")\n  |> filter(fn: (r) => r._field == \"wind_dir_max_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         },
         {
           "datasource": {
@@ -370,7 +394,7 @@
             "uid": "influxdb"
           },
           "refId": "B",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"davis\")\n  |> filter(fn: (r) => r._field == \"wind_dir_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"davis\")\n  |> filter(fn: (r) => r._field == \"wind_dir_deg\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -421,7 +445,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"precip_abs_mm\" or r._field == \"precip_diff_mm\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"precip_abs_mm\" or r._field == \"precip_diff_mm\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ]
     },
@@ -472,7 +496,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"precip_intensity_mmh\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"precip_intensity_mmh\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)"
         }
       ]
     },
@@ -523,7 +547,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"heater_temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"heater_temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -574,7 +598,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"supply_v\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"umb\" and r.umb_model == \"WS100\")\n  |> filter(fn: (r) => r._field == \"supply_v\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     },
@@ -625,7 +649,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"gauge\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"gauge\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         },
         {
           "datasource": {
@@ -633,7 +657,7 @@
             "uid": "influxdb"
           },
           "refId": "B",
-          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pt100\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"sensors\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => contains(value: r.node, set: ${node:json}))\n  |> filter(fn: (r) => r._measurement == \"pt100\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ]
     }
