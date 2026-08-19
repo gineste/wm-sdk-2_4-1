@@ -919,7 +919,7 @@ static uint32_t beacon_tx_task(void)
 /* ── Wirepas endpoints ──────────────────────────────────────────────────────── */
 #define EP_RS485_DOWN   1   /* gateway → bridge → motor (commands) */
 #define EP_RS485_UP     2   /* motor → bridge → gateway (replies)  */
-#define EP_GAUGE_CBOR   8   /* periodic MAX17261 fuel-gauge data as CBOR array */
+#define EP_GAUGE_CBOR  14   /* periodic MAX17261 fuel-gauge data as CBOR array */
 #define EP_PMIC_CBOR    9   /* periodic AEM10900 PMIC data as CBOR array */
 #define EP_HEARTBEAT   10   /* periodic uplink counter              */
 #define EP_SENSOR_CBOR 11   /* periodic CTN [T_C, R_T, diag] as CBOR array */
@@ -927,24 +927,53 @@ static uint32_t beacon_tx_task(void)
 
 /* ── MAX17261 fuel gauge ─────────────────────────────────────────────────────── */
 #if defined(USE_MAX17261)
-#define GAUGE_MONITOR_PERIOD_MS  10000U
+#define GAUGE_MONITOR_PERIOD_MS   4000U
+
+/* Temperature-based charge protection: the LTC4121 charger is gated via CHG_EN
+ * from the MAX17261 temperature. Charging is allowed only inside [0, 40] °C;
+ * hysteresis prevents chatter around the thresholds. */
+#define CHG_TEMP_MIN_C      0.0f
+#define CHG_TEMP_MAX_C     41.0f   /* charge cutoff high threshold */
+#define CHG_TEMP_HYST_C     1.0f
+#define CHG_RECOVERY_MS    30000U   /* re-check cadence while charge is blocked */
+
+static volatile bool m_chg_blocked = false;   /* true = charger held OFF by temp */
+static void apply_charge_protection(float temp_c);   /* defined near App_init */
 #define GAUGE_MONITOR_EXEC_US     3000U   /* I2C budget @ 100 kHz */
 #define GAUGE_RSENSE_MOHM           10U   /* sense resistor value — adjust to PCB */
+#define GAUGE_DESIGN_CAP_MAH      3100U   /* installed pack: Li-Ion 3100 mAh      */
 
-static max17261_data_t m_gauge;
-static bool            m_gauge_ready = false;
+static max17261_data_t   m_gauge;
+static max17261_health_t m_health;         /* slow aging/health metrics           */
+static bool              m_health_valid = false;
+static bool              m_gauge_ready = false;
 
 /* EP08: [voltage_mv (uint), soc (float %), temp (float °C), current_mA (int)]. */
 static void send_gauge_cbor_uplink(void)
 {
-    uint8_t buf[32];
+    /* EP14 CBOR array. Length discriminates the format for the collector:
+     *   4  = legacy live snapshot   [V, SOC, T, I]
+     *   14 = live + battery health  [V, SOC, T, I, Iavg, RepCap, FullCap,
+     *        DesignCap, Age%, Cycles, TTE_s, TTF_s, TimerH, status]
+     * 14 is even so it never collides with the UMB heuristic (odd len + big[0]). */
+    uint8_t buf[96];
     CborEncoder enc, arr;
     cbor_encoder_init(&enc, buf, sizeof(buf), 0);
-    cbor_encoder_create_array(&enc, &arr, 4);
+    cbor_encoder_create_array(&enc, &arr, 14);
     cbor_encode_uint(&arr, m_gauge.voltage_mv);
     cbor_encode_float(&arr, m_gauge.soc_pct);
     cbor_encode_float(&arr, m_gauge.temp_c);
     cbor_encode_int(&arr, m_gauge.current_ma);
+    cbor_encode_int(&arr, m_health.avg_current_ma);
+    cbor_encode_float(&arr, m_health.rep_cap_mah);
+    cbor_encode_float(&arr, m_health.full_cap_mah);
+    cbor_encode_float(&arr, m_health.design_cap_mah);
+    cbor_encode_float(&arr, m_health.age_pct);
+    cbor_encode_float(&arr, m_health.cycles);
+    cbor_encode_uint(&arr, m_health.tte_s);
+    cbor_encode_uint(&arr, m_health.ttf_s);
+    cbor_encode_float(&arr, m_health.timer_h);
+    cbor_encode_uint(&arr, m_gauge.status);
     cbor_encoder_close_container(&enc, &arr);
 
     size_t len = cbor_encoder_get_buffer_size(&enc, buf);
@@ -969,13 +998,22 @@ static uint32_t gauge_monitor_task(void)
 {
     if (!m_gauge_ready)
     {
-        max17261_res_e ir = MAX17261_init(GAUGE_RSENSE_MOHM, 1);
+        max17261_res_e ir = MAX17261_init(GAUGE_RSENSE_MOHM, GAUGE_DESIGN_CAP_MAH, 1);
         if (ir != MAX17261_RES_OK)
         {
             LOG(LVL_WARNING, CRED "MAX17261 init error %d (I2C_ERR=1) — retry in 10s" C0, (int)ir);
             return GAUGE_MONITOR_PERIOD_MS;
         }
         LOG(LVL_INFO, CGRN "MAX17261 init OK" C0);
+        /* Diagnostic: dump the temperature-source registers so we can see if the
+         * ETHRM/Ten/Tex write actually took (Config.4=ETHRM 8=Tex 9=Ten). */
+        uint16_t cfg = 0, pcfg = 0;
+        MAX17261_read_reg(0x1Du, &cfg);   /* Config  */
+        MAX17261_read_reg(0xBDu, &pcfg);  /* PackCfg */
+        LOG(LVL_INFO, CYEL "MAX17261 Config=0x%04x PackCfg=0x%04x "
+            "(TSEL=%u Ten=%u Tex=%u ETHRM=%u FTHRM=%u)" C0, cfg, pcfg,
+            (cfg >> 15) & 1u, (cfg >> 9) & 1u, (cfg >> 8) & 1u,
+            (cfg >> 4) & 1u, (cfg >> 3) & 1u);
         m_gauge_ready = true;
     }
 
@@ -989,13 +1027,37 @@ static uint32_t gauge_monitor_task(void)
 
     char bsoc[24], btmp[24];
     LOG(LVL_INFO,
-        CYEL "GAUGE: V=%u mV  SOC=%s %%  T=%s C  I=%d mA  st=0x%04x" C0,
+        CYEL "GAUGE: V=%u mV  SOC=%s %%  T=%s C  I=%d mA  st=0x%04x  CHG=%s(blk=%d)" C0,
         m_gauge.voltage_mv,
         fixed_str(bsoc, sizeof bsoc, m_gauge.soc_pct, 1),
         fixed_str(btmp, sizeof btmp, m_gauge.temp_c, 1),
-        (int)m_gauge.current_ma, m_gauge.status);
+        (int)m_gauge.current_ma, m_gauge.status,
+        m_chg_blocked ? "OFF" : "ON", (int)m_chg_blocked);
 
-    send_gauge_cbor_uplink();
+    /* Battery health / aging (slow-changing, learned by the ModelGauge m5). */
+    if (MAX17261_read_health(&m_health) == MAX17261_RES_OK)
+    {
+        m_health_valid = true;
+        char brc[24], bfc[24], bdc[24], bage[24], bcyc[24], bth[24];
+        LOG(LVL_INFO,
+            CYEL "HEALTH: Iavg=%d mA  Cap=%s/%s (design %s) mAh  Age=%s %%  "
+            "Cycles=%s  TTE=%us TTF=%us  Life=%s h" C0,
+            (int)m_health.avg_current_ma,
+            fixed_str(brc,  sizeof brc,  m_health.rep_cap_mah,   1),
+            fixed_str(bfc,  sizeof bfc,  m_health.full_cap_mah,  1),
+            fixed_str(bdc,  sizeof bdc,  m_health.design_cap_mah,1),
+            fixed_str(bage, sizeof bage, m_health.age_pct,       1),
+            fixed_str(bcyc, sizeof bcyc, m_health.cycles,        2),
+            (unsigned)m_health.tte_s, (unsigned)m_health.ttf_s,
+            fixed_str(bth,  sizeof bth,  m_health.timer_h,       1));
+    }
+
+    /* Charge protection (safety net + re-enable): the MAX17261 ALRT pin gives the
+     * fast STOP via the interrupt; this periodic read re-enables and catches any
+     * boot-already-hot / missed-edge case. */
+    apply_charge_protection(m_gauge.temp_c);
+
+    send_gauge_cbor_uplink();   /* EP14: [voltage_mv, soc, temp_c, current_ma] */
     return GAUGE_MONITOR_PERIOD_MS;
 }
 #endif /* USE_MAX17261 */
@@ -1903,16 +1965,48 @@ static uint32_t led_boot_off_task(void)
     return APP_SCHEDULER_STOP_TASK;
 }
 
-/* Scheduler task: confirm switch state 20 ms after edge (debounce). */
-static uint32_t switch_debounce_task(void)
+/* Apply the temperature charge policy (shared by the periodic gauge read, the
+ * recovery task and the boot check). CHG_EN is active-HIGH STOP. Hysteresis on
+ * re-enable; clears the MAX17261 alert so its ALRT pin re-arms. */
+static void apply_charge_protection(float temp_c)
 {
-    gpio_level_e level;
-    if (Gpio_inputRead(BOARD_GPIO_ID_SWITCH, &level) == GPIO_RES_OK
-        && level == GPIO_LEVEL_LOW)
+    if (!m_chg_blocked && (temp_c < CHG_TEMP_MIN_C || temp_c > CHG_TEMP_MAX_C))
     {
-        Gpio_outputToggle(BOARD_GPIO_ID_LED_GREEN);
+        m_chg_blocked = true;
+        Gpio_outputWrite(BOARD_GPIO_ID_CHG_EN, GPIO_LEVEL_HIGH);   /* stop */
+        Gpio_outputWrite(BOARD_GPIO_ID_LED_RED, GPIO_LEVEL_HIGH);  /* debug: overtemp LED on */
+        char b[24];
+        LOG(LVL_WARNING, CRED "CHG OFF: T=%s C out of [%d,%d]" C0,
+            fixed_str(b, sizeof b, temp_c, 1),
+            (int)CHG_TEMP_MIN_C, (int)CHG_TEMP_MAX_C);
     }
-    return APP_SCHEDULER_STOP_TASK;
+    else if (m_chg_blocked &&
+             temp_c > (CHG_TEMP_MIN_C + CHG_TEMP_HYST_C) &&
+             temp_c < (CHG_TEMP_MAX_C - CHG_TEMP_HYST_C))
+    {
+        m_chg_blocked = false;
+        Gpio_outputWrite(BOARD_GPIO_ID_CHG_EN, GPIO_LEVEL_LOW);    /* allow */
+        Gpio_outputWrite(BOARD_GPIO_ID_LED_RED, GPIO_LEVEL_LOW);   /* debug: overtemp LED off */
+        MAX17261_clear_temp_alert();
+        char b[24];
+        LOG(LVL_INFO, CGRN "CHG ON: T=%s C back in range" C0,
+            fixed_str(b, sizeof b, temp_c, 1));
+    }
+}
+
+/* Charge-protection evaluation, scheduled by the ALRT IRQ (any gauge alert) and
+ * reused as a recovery poll while blocked. Re-reads the temperature and lets
+ * apply_charge_protection() decide: block iff temperature is out of range,
+ * re-enable once back in. Charging is NEVER gated by non-temperature alerts
+ * (e.g. low battery voltage). Clears the temp alert so the ALRT pin can re-arm;
+ * keeps polling only while actually blocked. */
+static uint32_t chg_recovery_task(void)
+{
+    max17261_data_t d;
+    if (MAX17261_read(&d) == MAX17261_RES_OK)
+        apply_charge_protection(d.temp_c);
+    MAX17261_clear_temp_alert();
+    return m_chg_blocked ? CHG_RECOVERY_MS : APP_SCHEDULER_STOP_TASK;
 }
 
 /* GPIO interrupt callback: VBAT_EXT_nFAULT went low → power fault detected. */
@@ -1925,14 +2019,16 @@ static void vbat_fault_gpio_cb(gpio_id_t id, gpio_in_event_e event)
     }
 }
 
-/* GPIO interrupt callback: on falling edge, start/restart 20 ms debounce timer. */
-static void switch_gpio_cb(gpio_id_t id, gpio_in_event_e event)
+/* GPIO interrupt callback: MAX17261 ALRT (active-low) fell. Do NOT block charging
+ * here — the ALRT can fire for non-temperature reasons (voltage / SoC), and low
+ * battery voltage must NOT stop the charger. Just schedule a temperature
+ * re-evaluation; chg_recovery_task + apply_charge_protection gate the charger on
+ * measured temperature alone. */
+static void gauge_alert_cb(gpio_id_t id, gpio_in_event_e event)
 {
     (void)id;
     if (IS_FALLING_EDGE(event))
-    {
-        App_Scheduler_addTask_execTime(switch_debounce_task, 20U, 100U);
-    }
+        App_Scheduler_addTask_execTime(chg_recovery_task, 50U, GAUGE_MONITOR_EXEC_US);
 }
 
 /* ── App entry point ─────────────────────────────────────────────────────────── */
@@ -1943,14 +2039,12 @@ void App_init(const app_global_functions_t * functions)
     LOG_INIT();
     LOG(LVL_INFO, "RS485 bridge v1.1");
 
-    /* Set AUTOROLE_LL only on first boot (before the address is written by
-     * configureNodeFromBuildParameters). Subsequent boots preserve any role
-     * configured via Remote API / CSAP. */
-    app_addr_t _addr;
-    if (lib_settings->getNodeAddress(&_addr) != APP_RES_OK)
-    {
-        lib_settings->setNodeRole(APP_LIB_SETTINGS_ROLE_AUTOROLE_LE);
-    }
+    /* Force AUTOROLE Low-Latency on every boot: this bridge drives a motor over
+     * RS485 and needs the low round-trip latency of the LL profile. Applied
+     * unconditionally (not just first boot) so an already-commissioned node also
+     * switches to LL — must be set while the stack is stopped, i.e. here. */
+    lib_settings->setNodeRole(APP_LIB_SETTINGS_ROLE_AUTOROLE_LE |
+                              APP_LIB_SETTINGS_LL_ROLE_BIT);
 
     configureNodeFromBuildParameters();
 
@@ -1974,6 +2068,15 @@ void App_init(const app_global_functions_t * functions)
     Gpio_outputSetCfg(BOARD_GPIO_ID_VBAT_EXT_EN, &vbat_en_cfg);
     LOG(LVL_INFO, CGRN "VBAT_EXT (EXT_EN) enabled" C0);
 
+    /* Charger control (LTC4121 CHG_EN): active-HIGH STOP. Push-pull output,
+     * default LOW = charge allowed. gauge_monitor_task drives it HIGH when temp
+     * leaves [0,40] °C. */
+    static const gpio_out_cfg_t chg_en_cfg = {
+        .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
+        .level_default = GPIO_LEVEL_LOW,    /* low = charge allowed */
+    };
+    Gpio_outputSetCfg(BOARD_GPIO_ID_CHG_EN, &chg_en_cfg);
+
     /* LEDs: push-pull outputs, initially off */
     static const gpio_out_cfg_t led_cfg = {
         .out_mode_cfg  = GPIO_OUT_MODE_PUSH_PULL,
@@ -1987,13 +2090,14 @@ void App_init(const app_global_functions_t * functions)
     Gpio_outputWrite(BOARD_GPIO_ID_LED_RED,   GPIO_LEVEL_HIGH);
     App_Scheduler_addTask_execTime(led_boot_off_task, 1000U, 200U);
 
-    /* Switch: pull-up input, toggle green LED on press (active-low, falling edge) */
-    static const gpio_in_cfg_t switch_cfg = {
-        .event_cb    = switch_gpio_cb,
+    /* MAX17261 ALRT: pull-up input, open-drain active-low. Falling edge = temp
+     * out of the [0,30] °C window → gauge_alert_cb stops the charger (CHG_EN). */
+    static const gpio_in_cfg_t gauge_alert_in_cfg = {
+        .event_cb    = gauge_alert_cb,
         .event_cfg   = GPIO_IN_EVENT_FALLING_EDGE,
         .in_mode_cfg = GPIO_IN_PULL_UP,
     };
-    Gpio_inputSetCfg(BOARD_GPIO_ID_SWITCH, &switch_cfg);
+    Gpio_inputSetCfg(BOARD_GPIO_ID_GAUGE_ALERT, &gauge_alert_in_cfg);
 
     /* RS485 DE: push-pull output, initially LOW (receive mode) */
     static const gpio_out_cfg_t de_cfg = {

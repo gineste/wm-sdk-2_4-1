@@ -230,12 +230,23 @@ def decode_uplink(src_ep: int, dst_ep: int, payload: bytes) -> Optional[tuple]:
             if dev in UMB_MODELS:
                 tags["umb_model"] = UMB_MODELS[dev]
             return ("umb", fields, tags)
-        if n == 4:                            # MAX17261 fuel gauge
+        if n == 4:                            # MAX17261 fuel gauge (legacy)
             v = [_num(x) for x in arr]
             if any(x is None for x in v):
                 return None
             return ("gauge", {"voltage_mv": v[0], "soc_pct": v[1],
                               "temp_c": v[2], "current_ma": v[3]}, {})
+        if n == 14:                           # MAX17261 fuel gauge + health
+            v = [_num(x) for x in arr]
+            if any(x is None for x in v):
+                return None
+            return ("gauge", {
+                "voltage_mv": v[0], "soc_pct": v[1], "temp_c": v[2],
+                "current_ma": v[3], "avg_current_ma": v[4],
+                "rep_cap_mah": v[5], "full_cap_mah": v[6],
+                "design_cap_mah": v[7], "age_pct": v[8], "cycles": v[9],
+                "tte_s": v[10], "ttf_s": v[11], "timer_h": v[12],
+                "status": v[13]}, {})
         return None
 
     # Generic application endpoints: CBOR array of numbers.
