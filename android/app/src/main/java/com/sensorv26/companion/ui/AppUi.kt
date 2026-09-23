@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Nfc
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.WifiTethering
@@ -39,6 +40,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -59,27 +61,45 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sensorv26.companion.AppViewModel
 import com.sensorv26.companion.NfcMode
 import com.sensorv26.companion.Protocol
+import com.sensorv26.companion.Screen
 import com.sensorv26.companion.ble.ScannedBeacon
+import com.sensorv26.companion.nfc.se050.Se050ReadResult
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import java.security.cert.CertificateFactory
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppRoot(vm: AppViewModel, nfcAvailable: Boolean) {
     var tab by remember { mutableIntStateOf(0) }
-    val titles = listOf("NFC", "Scan", "Émission")
+    val titles = listOf("NFC", "Scan", "Émission", "SE050")
+
+    fun selectTab(i: Int) {
+        tab = i
+        // Screen 3 (SE050) reads a different device over a different NFC tech
+        // (IsoDep) than tabs 0-2 (NDEF mesh tag) - the ViewModel needs to know
+        // which one the single global onTagDiscovered callback should route to.
+        vm.setScreen(if (i == 3) Screen.SE050 else Screen.MESH_TAG)
+    }
 
     Scaffold(
         topBar = { CenterAlignedTopAppBar(title = { Text("SensorV26 Companion") }) },
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
-                    selected = tab == 0, onClick = { tab = 0 },
+                    selected = tab == 0, onClick = { selectTab(0) },
                     icon = { Icon(Icons.Filled.Nfc, null) }, label = { Text(titles[0]) })
                 NavigationBarItem(
-                    selected = tab == 1, onClick = { tab = 1 },
+                    selected = tab == 1, onClick = { selectTab(1) },
                     icon = { Icon(Icons.Filled.Sensors, null) }, label = { Text(titles[1]) })
                 NavigationBarItem(
-                    selected = tab == 2, onClick = { tab = 2 },
+                    selected = tab == 2, onClick = { selectTab(2) },
                     icon = { Icon(Icons.Filled.WifiTethering, null) }, label = { Text(titles[2]) })
+                NavigationBarItem(
+                    selected = tab == 3, onClick = { selectTab(3) },
+                    icon = { Icon(Icons.Filled.Fingerprint, null) }, label = { Text(titles[3]) })
             }
         }
     ) { pad ->
@@ -88,6 +108,7 @@ fun AppRoot(vm: AppViewModel, nfcAvailable: Boolean) {
                 0 -> NfcTab(vm, nfcAvailable)
                 1 -> ScanTab(vm)
                 2 -> EmitTab(vm)
+                3 -> Se050Tab(vm, nfcAvailable)
             }
         }
     }
@@ -403,6 +424,114 @@ private fun CmdButton(
         colors = colors,
         modifier = modifier.scale(scale),
     ) { Text(label) }
+}
+
+// ---------------------------------------------------------------- SE050 tab
+
+@Composable
+private fun Se050Tab(vm: AppViewModel, nfcAvailable: Boolean) {
+    val state by vm.se050.collectAsStateWithLifecycle()
+
+    Column(
+        Modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (!nfcAvailable) {
+            SectionCard {
+                Text("NFC désactivé ou indisponible.", color = MaterialTheme.colorScheme.error)
+            }
+        }
+
+        SectionCard {
+            Text("Identité SE050 (gateway nRF9160)", fontWeight = FontWeight.Bold)
+            Text(
+                "Approchez le téléphone de l'antenne NFC du SE050. Puce " +
+                        "vierge : clés d'usine a200/a201 essayées automatiquement. " +
+                        "Puce déjà rotée : scanner d'abord le QR de sa clé dérivée " +
+                        "(généré côté serveur pour ce device précis, jamais codé " +
+                        "en dur ni sauvegardé sur le téléphone).",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        SectionCard {
+            Text("Clé pour puce déjà rotée", fontWeight = FontWeight.Bold)
+            val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+                result.contents?.let { vm.setManualKeyFromQr(it) }
+            }
+            val mk = state.manualKey
+            if (mk != null) {
+                Text("QR chargé — UID attendu : ${mk.expectedUidHex ?: "(non vérifié)"}",
+                    fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { vm.clearManualKey() }) { Text("Oublier cette clé") }
+            } else {
+                OutlinedButton(
+                    onClick = {
+                        scanLauncher.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setPrompt("Scanner le QR de la clé SCP03")
+                                .setBeepEnabled(false)
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Scanner un QR de clé") }
+            }
+            state.manualKeyError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        when (val r = state.result) {
+            null -> Unit
+            is Se050ReadResult.Error -> SectionCard {
+                Text("Erreur", fontWeight = FontWeight.Bold)
+                Text(r.message, color = MaterialTheme.colorScheme.error)
+            }
+            is Se050ReadResult.Success -> {
+                SectionCard {
+                    Text("Jeu de clés SCP03", fontWeight = FontWeight.Bold)
+                    Text(r.keySetUsed, fontFamily = FontFamily.Monospace)
+                }
+                SectionCard {
+                    Text("UID (18 octets)", fontWeight = FontWeight.Bold)
+                    Text(r.uidHex, fontFamily = FontFamily.Monospace)
+                }
+                SectionCard {
+                    Text("Clé publique (point EC brut 04‖X‖Y, 65 octets)", fontWeight = FontWeight.Bold)
+                    Text(r.pubkeyRawHex, fontFamily = FontFamily.Monospace)
+                }
+                SectionCard {
+                    Text("Certificat (${r.certDer.size} octets DER)", fontWeight = FontWeight.Bold)
+                    val parsed = remember(r.certDer) { runCatching { parseCert(r.certDer) } }.getOrNull()
+                    if (parsed != null) {
+                        Text("Sujet : ${parsed.subject}", fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall)
+                        Text("Valide du ${parsed.notBefore} au ${parsed.notAfter}",
+                            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Text("Certificat lu mais non parseable en X.509 standard",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class ParsedCert(val subject: String, val notBefore: String, val notAfter: String)
+
+private fun parseCert(der: ByteArray): ParsedCert {
+    val cert = CertificateFactory.getInstance("X.509")
+        .generateCertificate(der.inputStream()) as java.security.cert.X509Certificate
+    val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
+    return ParsedCert(
+        subject = cert.subjectX500Principal.name,
+        notBefore = fmt.format(cert.notBefore),
+        notAfter = fmt.format(cert.notAfter),
+    )
 }
 
 @Composable

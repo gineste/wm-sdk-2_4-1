@@ -53,12 +53,21 @@ class MainActivity : ComponentActivity() {
 
     private fun enableNfcReaderMode() {
         val adapter = nfcAdapter ?: return
-        // No SKIP_NDEF_CHECK: we want the platform to detect NDEF so Ndef.get()
-        // is populated. A presence-check delay avoids premature disconnects.
+        // FLAG_READER_SKIP_NDEF_CHECK: the platform otherwise runs its own NDEF
+        // probe on every newly-detected tag before handing it to this callback -
+        // harmless for the mesh tag (genuinely NDEF, and NfcNdef.read() does its
+        // own explicit Ndef.get()/connect() regardless of this flag), but for the
+        // SE050 (not an NDEF applet at all) that platform-level probe was
+        // preventing the tag from ever reaching onTagDiscovered - no callback, no
+        // error, nothing in logcat, since the NDEF check runs inside NfcService
+        // before our code is ever invoked. Found 2026-09-22 debugging exactly
+        // that symptom against a real SE050C2 already confirmed working NFC with
+        // a generic reader app.
         val flags = NfcAdapter.FLAG_READER_NFC_A or
                 NfcAdapter.FLAG_READER_NFC_B or
                 NfcAdapter.FLAG_READER_NFC_F or
-                NfcAdapter.FLAG_READER_NFC_V
+                NfcAdapter.FLAG_READER_NFC_V or
+                NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
         val extras = Bundle().apply {
             putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
         }
